@@ -45,15 +45,22 @@ _OPENING_BLEED_PX = 1
 _WINDOW_SLIT_SHARE = 1 / 3
 """窗缝占墙厚的比例：留三分之一，两侧各剩三分之一黑边——平面图上一眼认得出是窗。"""
 
-MIN_OUTLINE_CLOSURE_RATIO = 0.95
+MIN_OUTLINE_CLOSURE_RATIO = 0.90
 """外圈闭合率门槛。低于它即响亮失败——**外圈漏风的母版不许当几何唯一源往下游传**。
 
 同几何提取那道自证（房间拼不满户型即失败）：判据不是"看着还行"，是一个算得出来的数。
-后面每一张风格图都回读母版、"户型有没有漂"靠它量，底子上缺一段外墙，
-下游没有任何一步能发现。"""
+后面每一张风格图都回读母版、"户型有没有漂"靠它量，底子上缺一段外墙，下游没有一步能发现。
+
+**取 0.90 而不是 1.0，因为量的东西自带残差**：这个数拿房间遮罩的边界去比墙，而房间遮罩
+只盖住户型内部自由面积的九成七（几何那侧的自证数），剩下的"没归着"处也会贡献边界像素，
+那些地方本来就不该有墙。首个真实样例实测：几何缺四条飘窗边时 **64%**，补齐后 **94%**——
+门槛落在两者中间，分得开。**样本只有一张**，复看时点＝拿到第二批样本时。"""
 
 _OUTLINE_PROBE_PX = 5
 """量外圈时往里剥几像素取边界带。"""
+
+_SAME_LINE_TOLERANCE = 0.006
+"""判"洞在哪道墙上"时位置的容差：外轮廓给的是墙带中心线，与网格投票出来的线差半个墙厚是常态。"""
 
 _OUTLINE_TOLERANCE_PX = 9
 """墙压在边界上的容差：墙心线与房间边界差几像素是画法本身带来的，不是漏墙。"""
@@ -123,10 +130,14 @@ def _lay_solid_walls(frame: _Frame, geometry: FloorplanGeometry) -> Image.Image:
     """只砌墙不开洞。外圈闭合率对着这一张量——**窗和门都是墙上的构造，不是墙没了**；
     对着开完洞的图量，一户飘窗多的房子会被自己的窗判成外墙漏风。"""
     layer = Image.new("L", (frame.width_px, frame.height_px), _PAPER)
-    pen = ImageDraw.Draw(layer)
-    for wall in geometry.walls:
-        pen.rectangle(_band(frame, wall, _wall_thickness_px(frame, wall)), fill=_WALL_INK)
+    _brush_walls(frame, geometry, ImageDraw.Draw(layer))
     return layer
+
+
+def _brush_walls(frame: _Frame, geometry: FloorplanGeometry, pen: ImageDraw.ImageDraw) -> None:
+    """外轮廓与网格墙一起砌。两处都是墙，重合的段画两遍是同一笔黑。"""
+    for wall in (*geometry.outline, *geometry.walls):
+        pen.rectangle(_band(frame, wall, _wall_thickness_px(frame, wall)), fill=_WALL_INK)
 
 
 def _lay_walls(frame: _Frame, geometry: FloorplanGeometry, ground: Image.Image) -> Image.Image:
@@ -146,8 +157,7 @@ def _lay_walls(frame: _Frame, geometry: FloorplanGeometry, ground: Image.Image) 
     """
     layer = ground.copy()
     pen = ImageDraw.Draw(layer)
-    for wall in geometry.walls:
-        pen.rectangle(_band(frame, wall, _wall_thickness_px(frame, wall)), fill=_WALL_INK)
+    _brush_walls(frame, geometry, pen)
     for opening in geometry.openings:
         thickness_px = _opening_thickness_px(frame, geometry, opening)
         if opening.is_on_outer_wall:
@@ -173,12 +183,16 @@ def _opening_thickness_px(
     """洞所在那道墙有多厚。找不到同位置的墙就按最厚的擦——宁可擦透，别留墙渣。"""
     same_line = [
         wall
-        for wall in geometry.walls
-        if wall.axis == opening.axis and abs(wall.position_ratio - opening.position_ratio) < 1e-9
+        for wall in (*geometry.outline, *geometry.walls)
+        if wall.axis == opening.axis
+        and abs(wall.position_ratio - opening.position_ratio) < _SAME_LINE_TOLERANCE
     ]
     thickness_px = max(
         (_wall_thickness_px(frame, wall) for wall in same_line),
-        default=max((_wall_thickness_px(frame, wall) for wall in geometry.walls), default=0.0),
+        default=max(
+            (_wall_thickness_px(frame, wall) for wall in (*geometry.outline, *geometry.walls)),
+            default=0.0,
+        ),
     )
     return max(thickness_px, _MIN_WALL_PX) + 2 * _OPENING_BLEED_PX
 

@@ -70,6 +70,10 @@ class RoomOutline(_GeometryModel):
 class FloorplanGeometry(_GeometryModel):
     """母版的唯一几何来源：轮廓、墙、洞、房间遮罩，**没有任何绝对尺寸**。
 
+    `outline` 是户型外轮廓那一圈墙，与 `walls` 分列：`walls` 是网格投票出来的线，投不上票的
+    外墙不在里面（飘窗那种墙往外折一个台阶的段）。**两处都当墙画**，重合的段画两遍是同一笔黑。
+    **洞只挂在 `walls` 上**，外轮廓这条路不产生洞。
+
     `frame_*_px` 是这一整套比例的参照系（像素，不是真实世界尺寸）。缺了它画不出正确形状：
     x 按图宽归一、y 按图高归一，一张长方形的户型会被画成正方形。
     """
@@ -77,6 +81,7 @@ class FloorplanGeometry(_GeometryModel):
     frame_width_px: int
     frame_height_px: int
     plan_box: tuple[float, float, float, float]
+    outline: list[PlanWall] = Field(default_factory=list)
     walls: list[PlanWall] = Field(default_factory=list)
     openings: list[PlanOpening] = Field(default_factory=list)
     rooms: list[RoomOutline] = Field(default_factory=list)
