@@ -52,6 +52,10 @@ class PlanOpening(_GeometryModel):
     start_ratio: float
     end_ratio: float
     is_on_outer_wall: bool
+    connects: list[str] = Field(default_factory=list)
+    """这个洞两侧的房间名。**画图这一侧用不上**（画法只看洞在内墙还是外墙，与通向哪儿无关），
+    收下它是因为产出侧给了——`extra="forbid"` 的意思是"多出来的字段说明两侧对不上头"，
+    而这一条不是对不上，是产出侧新给的。"""
 
 
 class RoomOutline(_GeometryModel):
@@ -99,6 +103,33 @@ class RoomAnchor(BaseModel):
     mask_index: int
     anchor_x_px: int
     anchor_y_px: int
+
+
+class PlanNote(_GeometryModel):
+    """一条挂在房间上的批注：说哪间、说什么、依据引的是哪几条事实。
+
+    `cites` 在这一层**不判只带**：引用查得对不对已经在产它的那一侧机检过了，
+    画图的一侧再判一遍是把同一个判据抄成两份——抄出来的那份不会跟着改判走。
+    带着它是为了将来能回答"图上这句话的根据是什么"。
+    """
+
+    room: str
+    text: str
+    cites: list[str] = Field(default_factory=list)
+
+
+class PlanBrief(BaseModel):
+    """功能说明图：母版 + 房间名 + 批注，**全部确定性画上去**。
+
+    与风格图分工写死：风格图归生成式（模型画画面、不写字），说明图归确定性（代码画字、
+    坐标算得准）。**说明的内容仍是模型产的**——产在别处、引得到事实、过了机检，这里只负责
+    把它画到该在的位置上。
+    """
+
+    image_png: bytes
+    width_px: int
+    height_px: int
+    note_count: int = 0
 
 
 class PlanMaster(BaseModel):

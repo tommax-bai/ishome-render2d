@@ -68,7 +68,7 @@ root_packages = ["render2d_worker"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "worker|cli → activities → plan_master → models 单向"
+name = "worker|cli → activities → plan_brief → plan_master → cjk_font → models 单向"
 type = "layers"
 # 两个入口同层且互不可见（"|" = independent siblings）：`worker` 是 Temporal 入口，
 # `cli` 是本地画母版的工具。**cli 不许经 activities**——它是不碰 Temporal 与对象存储的那条路，
@@ -76,7 +76,9 @@ type = "layers"
 layers = [
   "worker | cli",
   "activities",
+  "plan_brief",
   "plan_master",
+  "cjk_font",
   "models",
 ]
 containers = ["render2d_worker"]
