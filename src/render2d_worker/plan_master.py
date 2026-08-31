@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
@@ -242,6 +243,16 @@ def _outline_closure_ratio(rooms_mask: Image.Image, walls: Image.Image) -> float
         return 0.0
     covered = sum(1 for edge, wall in zip(border_px, ink_px, strict=True) if edge and wall)
     return covered / total
+
+
+def room_anchors_json(rooms: list[RoomAnchor]) -> bytes:
+    """房间锚点清单的字节形态。**只写在这一处**：本地写文件与写进私有桶的是同一份字节。
+
+    两处各写一遍，就会长出"本地那份带缩进、桶里那份不带"这种差别；而下游拿哪一份都得认得。
+    """
+    return json.dumps([room.model_dump() for room in rooms], ensure_ascii=False, indent=2).encode(
+        "utf-8"
+    )
 
 
 def _to_png(image: Image.Image) -> bytes:

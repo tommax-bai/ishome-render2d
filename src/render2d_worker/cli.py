@@ -23,6 +23,7 @@ from render2d_worker.plan_master import (
     DEFAULT_MARGIN_PX,
     PlanMasterError,
     render_plan_master,
+    room_anchors_json,
 )
 
 MASTER_PNG = "plan-master.png"
@@ -71,10 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     (args.out / MASTER_PNG).write_bytes(master.master_png)
     (args.out / WALLS_PNG).write_bytes(master.walls_png)
     (args.out / ROOMS_PNG).write_bytes(master.rooms_png)
-    (args.out / ROOMS_JSON).write_text(
-        json.dumps([room.model_dump() for room in master.rooms], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    (args.out / ROOMS_JSON).write_bytes(room_anchors_json(master.rooms))
 
     print(f"母版已出：{args.out}（{master.width_px}×{master.height_px}px）")
     print(

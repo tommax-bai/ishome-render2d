@@ -9,6 +9,9 @@ dependencies = [
   "pydantic>=2.9",
   # 母版是确定性栅格绘制：同一份几何画两次要逐字节相同，走纯 Python 光栅、不引系统级渲染栈
   "pillow>=11",
+  # 私有对象存储：母版要交给另一个仓的服务（imagegen 图生图），说明图要发到业主手机上，
+  # 一张 1600px 的图不塞进编排的 payload 里传
+  "oss2>=2.18",
 ]
 
 [project.scripts]
@@ -52,6 +55,11 @@ strict = true
 python_version = "3.12"
 files = ["src", "tests"]
 
+# oss2 不带 py.typed（阿里云 OSS SDK）；定向忽略，勿扩大范围
+[[tool.mypy.overrides]]
+module = ["oss2", "oss2.*"]
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------
@@ -82,3 +90,27 @@ layers = [
   "models",
 ]
 containers = ["render2d_worker"]
+
+[[tool.importlinter.contracts]]
+name = "出站边缘 plan_store 不感知上层：只依赖运行库——写图的那只手看不见图上画了什么"
+type = "forbidden"
+source_modules = ["render2d_worker.plan_store"]
+forbidden_modules = [
+  "render2d_worker.models",
+  "render2d_worker.cjk_font",
+  "render2d_worker.plan_master",
+  "render2d_worker.plan_brief",
+  "render2d_worker.style_caption",
+  "render2d_worker.activities",
+  "render2d_worker.cli",
+  "render2d_worker.worker",
+  "temporalio",
+]
+
+[[tool.importlinter.contracts]]
+name = "cli 不碰对象存储：本地画一张图不要凭证"
+type = "forbidden"
+# 上面那条 layers 管不到 `plan_store`（它不在层里），而"CLI 不碰对象存储"此前只是 README 上的
+# 一句话。**能自动拦住的不写成纪律**：从这里起它是结构。
+source_modules = ["render2d_worker.cli"]
+forbidden_modules = ["render2d_worker.plan_store", "oss2"]

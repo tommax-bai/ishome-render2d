@@ -156,7 +156,13 @@ class StyleCaptioned(BaseModel):
 
 
 class PlanMaster(BaseModel):
-    """母版一次绘制的全部产物：给人看的那张 + 两张机器可读层 + 房间锚点。"""
+    """母版一次绘制的全部产物：给人看的那张 + 两张机器可读层 + 房间锚点。
+
+    **本模块没有 activity 的出入参模型**：`plan-2d-render` 的入参是不透明字典（派发方不
+    import 本仓签名，两边只靠 contracts 注册名接头），出参是对象键。这一批是**画法的模型**，
+    不是协议的模型。骨架期那个 `PlanRenderRequest`（`revision_id` + `purpose`）已删——
+    它描述的入参形态今天不成立，而一份没人构造的"契约"会被当成契约读。
+    """
 
     master_png: bytes
     walls_png: bytes
@@ -166,14 +172,3 @@ class PlanMaster(BaseModel):
     rooms: list[RoomAnchor] = Field(default_factory=list)
     outline_closure_ratio: float = 0.0
     """户型外轮廓被墙盖住的比例——母版自己的自证数，不达标整张不出（fail loud）。"""
-
-
-class PlanRenderRequest(BaseModel):
-    """plan-2d-render 输入。
-
-    同一管线两种用途：确认底图（画 BaseFacts 识别结果）/ 母版（画冻结后的
-    PreliminaryPlan）。除 PNG 外必须输出房间遮罩与墙体图层（机器可读层）。
-    """
-
-    revision_id: str
-    purpose: Literal["confirmation_base", "plan_master"]

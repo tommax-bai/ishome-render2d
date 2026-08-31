@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from temporalio import activity
 
-from render2d_worker.activities import ACTIVITY_REGISTRY
+from render2d_worker.activities import ACTIVITY_PLAN_2D_RENDER, PlanRenderer
 
 # 注册名 → 函数名（kebab-case ↔ snake_case 动词前置，规范 §2.4）
 CONTRACTS_ACTIVITY_REGISTRY: dict[str, str] = {
@@ -17,13 +17,15 @@ CONTRACTS_ACTIVITY_REGISTRY: dict[str, str] = {
 
 
 def test_registry_matches_contracts() -> None:
-    assert set(ACTIVITY_REGISTRY) == set(CONTRACTS_ACTIVITY_REGISTRY)
+    """本仓承接的注册名全集就这一个（contracts #4）。"""
+    assert {ACTIVITY_PLAN_2D_RENDER} == set(CONTRACTS_ACTIVITY_REGISTRY)
 
 
-def test_registered_temporal_names_match_keys() -> None:
-    """字典键、@activity.defn(name=...) 注册名、函数名三者一致。"""
-    for registry_name, fn in ACTIVITY_REGISTRY.items():
-        defn = activity._Definition.from_callable(fn)  # noqa: SLF001
-        assert defn is not None, f"{registry_name} is not a temporal activity"
-        assert defn.name == registry_name
-        assert fn.__name__ == CONTRACTS_ACTIVITY_REGISTRY[registry_name]
+def test_registered_temporal_name_matches_the_key() -> None:
+    """常量、@activity.defn(name=...) 注册名、函数名三者一致。"""
+    defn = activity._Definition.from_callable(PlanRenderer.render_plan_2d)  # noqa: SLF001
+    assert defn is not None, f"{ACTIVITY_PLAN_2D_RENDER} is not a temporal activity"
+    assert defn.name == ACTIVITY_PLAN_2D_RENDER
+    assert (
+        PlanRenderer.render_plan_2d.__name__ == CONTRACTS_ACTIVITY_REGISTRY[ACTIVITY_PLAN_2D_RENDER]
+    )
