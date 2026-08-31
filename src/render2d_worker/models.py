@@ -132,6 +132,29 @@ class PlanBrief(BaseModel):
     note_count: int = 0
 
 
+class PlanCopy(_GeometryModel):
+    """获客图上的页面文案：这个家的名字、一句打中人的话、三条小贴士。
+
+    **这一处不走强制引用**（用户裁决 2026-08-31）：获客图是获客工具不是严谨报告数据。
+    数字仍不许编，但那条在产文案的一侧机检过了——画图这一侧不判只画（判据抄成两份，
+    抄出来的那份不会跟着改判走）。
+    """
+
+    title: str
+    summary: str
+    tips: list[str] = Field(default_factory=list)
+
+
+class StyleCaptioned(BaseModel):
+    """叠完字的风格图，连同量到的连续空白高度（不够时它就是失败原因本身）。"""
+
+    image_png: bytes
+    width_px: int
+    height_px: int
+    top_blank_px: int = 0
+    bottom_blank_px: int = 0
+
+
 class PlanMaster(BaseModel):
     """母版一次绘制的全部产物：给人看的那张 + 两张机器可读层 + 房间锚点。"""
 
