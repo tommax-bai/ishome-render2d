@@ -45,7 +45,19 @@ _OPENING_BLEED_PX = 1
 """擦门洞时比墙厚多擦一点：正好等厚会在洞口两侧留下一像素的墙渣。"""
 
 _WINDOW_SLIT_SHARE = 1 / 3
-"""窗缝占墙厚的比例：留三分之一，两侧各剩三分之一黑边——平面图上一眼认得出是窗。"""
+"""窗缝占墙带的比例：正中留三分之一，两侧各剩三分之一黑边——平面图上一眼认得出是窗。"""
+
+_SEAM_GAP_SOURCE_PX = 3.0
+"""同一条线上相邻两段描边之间算**量化接缝**的缝宽上限，按源图像素计。
+
+外轮廓沿边界逐段描，段的起讫落在源图整像素上，相邻段之间于是留 1 源图像素的缝；
+外轮廓与网格墙的接头也是同一形态。两段中心还错着位时这道缝谁都不盖，印出来就是
+一条白发丝或一个白缺口（92㎡ 样例阳台左下"带白色缺口的黑块堆叠"，业主 2026-09-01 点出）。
+
+**首个真实样例实测**（母版实际砌的 100 段里同线且墙带相交的段对）：缝宽 1 源图像素的
+38 对、2 的 2 对，再往上是 4（仅一对，且那段缝已被同线另一段盖住）、7 起步的真实分隔
+（门洞、两段各归各的墙）。上限取 3：盖住 1~2 的量化缝，离 7 那头还有 2.3 倍。
+**样本只有一张**，复看时点＝拿到第二批样本时（同 `MIN_OUTLINE_CLOSURE_RATIO`）。"""
 
 MIN_OUTLINE_CLOSURE_RATIO = 0.90
 """外圈闭合率门槛。低于它即响亮失败——**外圈漏风的母版不许当几何唯一源往下游传**。
@@ -174,8 +186,11 @@ def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
 
     **只换墙带、不删段**（`outline` 一段不动，网格墙一段不少），所以：
     - 只在 `outline` 里的台阶（飘窗那种）照旧画——补外轮廓解决的问题不会倒退；
-    - 网格墙的起讫原样保留，外轮廓分段之间那一像素的缝仍由它盖住；
+    - 网格墙的起讫原样保留；
     - 外轮廓够不着的边（内墙全部在此）一个坐标不动。
+
+    拼完最后把同线相邻段之间的量化接缝补上（:func:`_seam_bridges`）——网格墙能盖住其中
+    一部分，盖不住的那些印出来就是白发丝。
     """
     masonry = list(geometry.outline)
     for wall in geometry.walls:
@@ -198,7 +213,57 @@ def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
                 update={"position_ratio": (low + high) / 2, "thickness_ratio": high - low}
             )
         )
+    masonry.extend(_seam_bridges(geometry, masonry))
     return masonry
+
+
+def _seam_bridges(geometry: FloorplanGeometry, masonry: Sequence[PlanWall]) -> list[PlanWall]:
+    """同一条线上相邻两段描边之间的量化接缝，各补一节短墙盖住。
+
+    判据两条，缺一不补：**横向墙带真的相交**——平行而不共线的两段之间是台阶不是接缝，
+    飘窗那种台阶必须原样留着（`test_outline_only_step_survives_the_calibration` 盯着）；
+    **缝宽不超过** :data:`_SEAM_GAP_SOURCE_PX` ——更宽的是门洞或两段各归各的墙。
+
+    补的那节墙带取两段墙带的**交**不取并：缝只有一两个源图像素宽，交集足以盖住白缝，
+    并集会在接缝处凸出一块两段描边都没说过的墙。
+    """
+    bridges: list[PlanWall] = []
+    for index, one in enumerate(masonry):
+        for other in masonry[index + 1 :]:
+            if one.axis != other.axis:
+                continue
+            low = max(
+                one.position_ratio - one.thickness_ratio / 2,
+                other.position_ratio - other.thickness_ratio / 2,
+            )
+            high = min(
+                one.position_ratio + one.thickness_ratio / 2,
+                other.position_ratio + other.thickness_ratio / 2,
+            )
+            if high <= low:
+                continue
+            first, second = (
+                (one, other)
+                if other.start_ratio - one.end_ratio >= one.start_ratio - other.end_ratio
+                else (other, one)
+            )
+            gap_ratio = second.start_ratio - first.end_ratio
+            # 缝沿着墙的长度方向量，归一化分母随轴向变（竖墙的长度按图高、横墙按图宽）
+            axis_px = (
+                geometry.frame_height_px if one.axis == "vertical" else geometry.frame_width_px
+            )
+            if not 0 < gap_ratio * axis_px <= _SEAM_GAP_SOURCE_PX:
+                continue
+            bridges.append(
+                PlanWall(
+                    axis=one.axis,
+                    position_ratio=(low + high) / 2,
+                    start_ratio=first.end_ratio,
+                    end_ratio=second.start_ratio,
+                    thickness_ratio=high - low,
+                )
+            )
+    return bridges
 
 
 def _lay_solid_walls(frame: _Frame, masonry: Sequence[PlanWall]) -> Image.Image:
@@ -242,12 +307,16 @@ def _lay_walls(
     pen = ImageDraw.Draw(layer)
     _brush_walls(frame, masonry, pen)
     for opening in geometry.openings:
-        thickness_px = _opening_thickness_px(frame, masonry, opening)
+        low_px, high_px = _opening_band_px(frame, masonry, opening)
         if opening.is_on_outer_wall:
-            pen.rectangle(_band(frame, opening, thickness_px * _WINDOW_SLIT_SHARE), fill=_PAPER)
+            slit_margin_px = (high_px - low_px) * _WINDOW_SLIT_SHARE
+            slit = (low_px + slit_margin_px, high_px - slit_margin_px)
+            pen.rectangle(_opening_box(frame, opening, slit), fill=_PAPER)
             continue
         # 门：还窄了留墙渣，还宽了把邻墙也啃掉
-        box = _band(frame, opening, thickness_px)
+        box = _opening_box(
+            frame, opening, (low_px - _OPENING_BLEED_PX, high_px + _OPENING_BLEED_PX)
+        )
         crop = (round(box[0]), round(box[1]), round(box[2]), round(box[3]))
         layer.paste(ground.crop(crop), crop[:2])
     return layer
@@ -260,24 +329,53 @@ def _room_ground(frame: _Frame, rooms_mask: Image.Image) -> Image.Image:
     return Image.composite(Image.new("L", size, _ROOM_TINT), Image.new("L", size, _PAPER), inside)
 
 
-def _opening_thickness_px(
-    frame: _Frame, masonry: Sequence[PlanWall], opening: PlanOpening
-) -> float:
-    """洞所在那道墙有多厚。找不到同位置的墙就按最厚的擦——宁可擦透，别留墙渣。
+def _lateral_band_px(frame: _Frame, wall: PlanWall) -> tuple[float, float]:
+    """一段墙实际砌出来的横向墙带（母版像素）：与 :func:`_band` 同一笔账，只取横向那一对。"""
+    box = _band(frame, wall, _wall_thickness_px(frame, wall))
+    return (box[0], box[2]) if wall.axis == "vertical" else (box[1], box[3])
 
-    量的是砌上去的那一份墙（`_masonry`）：墙带按外轮廓校准之后还照原始厚度擦，会把洞两侧
-    的墙一起啃掉。"""
+
+def _opening_band_px(
+    frame: _Frame, masonry: Sequence[PlanWall], opening: PlanOpening
+) -> tuple[float, float]:
+    """洞要擦的横向墙带（母版像素）：跟着**实际砌的那段墙**走，不按洞自带的中心线摆。
+
+    洞的位置继承自网格墙的中心线，而这段墙可能已按外轮廓砌在别的中心上（`_masonry`）。
+    仍按洞的中心擦，窗缝就偏出墙带正中——92㎡ 样例的卫生间窗一侧黑边只剩 3px、另一侧
+    15px，业主看到的就是"两条细竖线夹白缝"（2026-09-01）。
+
+    找不到与洞同段的墙（同线且起讫相交）时按洞的中心、同线最厚的墙带擦；连同线的墙都
+    没有就按全图最厚的擦——宁可擦透，别留墙渣。"""
     same_line = [
         wall
         for wall in masonry
         if wall.axis == opening.axis
         and abs(wall.position_ratio - opening.position_ratio) < _SAME_LINE_TOLERANCE
     ]
+    local = [
+        wall
+        for wall in same_line
+        if min(wall.end_ratio, opening.end_ratio) > max(wall.start_ratio, opening.start_ratio)
+    ]
+    if local:
+        bands = [_lateral_band_px(frame, wall) for wall in local]
+        return (min(low for low, _ in bands), max(high for _, high in bands))
     thickness_px = max(
         (_wall_thickness_px(frame, wall) for wall in same_line),
         default=max((_wall_thickness_px(frame, wall) for wall in masonry), default=0.0),
     )
-    return max(thickness_px, _MIN_WALL_PX) + 2 * _OPENING_BLEED_PX
+    box = _band(frame, opening, thickness_px)
+    return (box[0], box[2]) if opening.axis == "vertical" else (box[1], box[3])
+
+
+def _opening_box(
+    frame: _Frame, opening: PlanOpening, lateral_px: tuple[float, float]
+) -> tuple[float, float, float, float]:
+    """洞在母版上要擦的矩形：长度方向按洞的起讫，横向按给定的墙带（母版像素）。"""
+    low_px, high_px = lateral_px
+    if opening.axis == "vertical":
+        return (low_px, frame.y(opening.start_ratio), high_px, frame.y(opening.end_ratio))
+    return (frame.x(opening.start_ratio), low_px, frame.x(opening.end_ratio), high_px)
 
 
 def _draw_rooms(frame: _Frame, geometry: FloorplanGeometry) -> tuple[Image.Image, list[RoomAnchor]]:

@@ -237,6 +237,144 @@ def test_outline_only_step_survives_the_calibration() -> None:
     assert _ink_at(walls, x, y) < 128, "只在外轮廓里的那一段台阶没画上——补外轮廓那件事倒退了"
 
 
+def _column_ink_runs_px(image: Image.Image, x: int, until_y: int) -> list[tuple[int, int]]:
+    """一列上从顶往下数黑段：逐段给 (起点 y, 高度 px)。量窗缝居不居中就是量这个。"""
+    runs: list[tuple[int, int]] = []
+    y = 0
+    while y < until_y:
+        if _ink_at(image, x, y) < 128:
+            start = y
+            while y < until_y and _ink_at(image, x, y) < 128:
+                y += 1
+            runs.append((start, y - start))
+        else:
+            y += 1
+    return runs
+
+
+def test_window_slit_stays_centered_in_the_wall_band_actually_laid() -> None:
+    """窗缝开在**实际砌出来的墙带**正中——洞自带的中心线与墙带中心不一致时跟墙带走。
+
+    来路：92㎡ 样例的卫生间窗（2026-09-01）。洞的位置继承自网格墙的中心线，墙带却按
+    外轮廓砌在别的中心上，窗缝仍按洞的中心擦，一侧黑边剩 3px、另一侧 15px——业主看到的
+    "两条细竖线夹白缝"。
+    """
+    nudged_outline = [
+        PlanWall(
+            axis="horizontal",
+            position_ratio=_TOP + _THICKNESS * 0.4,
+            start_ratio=_LEFT,
+            end_ratio=_RIGHT,
+            thickness_ratio=_THICKNESS,
+        )
+    ]
+    window = PlanOpening(
+        axis="horizontal",
+        position_ratio=_TOP,
+        start_ratio=0.35,
+        end_ratio=0.45,
+        is_on_outer_wall=True,
+    )
+    master = render_plan_master(_geometry(openings=[window], outline=nudged_outline))
+    walls = Image.open(io.BytesIO(master.walls_png))
+
+    window_x = round((0.40 - _LEFT) / (_RIGHT - _LEFT) * (master.width_px - 48)) + 24
+    edges = _column_ink_runs_px(walls, window_x, 80)
+
+    assert len(edges) == 2, f"窗该是两条黑边夹一条缝，量到 {edges}"
+    (_, first_px), (_, second_px) = edges
+    assert abs(first_px - second_px) <= 2, (
+        f"窗缝没开在墙带正中：两侧黑边 {first_px}px 与 {second_px}px——"
+        f"缝跟着洞自带的中心线跑了，没跟着实际砌的墙带"
+    )
+    assert min(first_px, second_px) >= 6, f"有一侧黑边细成了发丝：{edges}"
+
+
+def test_a_quantization_seam_between_colinear_strokes_is_bridged() -> None:
+    """同一条线上相邻两段描边之间 1 源图像素的量化缝要补住，不许印成白发丝。
+
+    来路：92㎡ 样例阳台左下（2026-09-01）。外轮廓逐段描、段的起讫落在源图整像素上，
+    相邻段之间留 1 源图像素的缝；两段中心又错着位，谁都不盖这道缝，印出来是
+    "带白色缺口的黑块堆叠"。
+
+    接缝故意不放在 0.5：隔墙在那儿，那一列自带墨，缝没补上测试也会假绿。
+    """
+    seam_at = 0.35
+    split_top = [
+        PlanWall(
+            axis="horizontal",
+            position_ratio=_TOP,
+            start_ratio=_LEFT,
+            end_ratio=seam_at,
+            thickness_ratio=_THICKNESS,
+        ),
+        PlanWall(
+            axis="horizontal",
+            position_ratio=_TOP + _THICKNESS * 0.4,
+            start_ratio=seam_at + 0.001,  # 1 源图像素的缝（图宽 1000px）
+            end_ratio=_RIGHT,
+            thickness_ratio=_THICKNESS,
+        ),
+        *(
+            wall
+            for wall in _outer_walls()
+            if wall.axis == "vertical" or wall.position_ratio != _TOP
+        ),
+    ]
+    master = render_plan_master(_geometry(walls=split_top))
+    walls = Image.open(io.BytesIO(master.walls_png))
+
+    seam_x = round((seam_at + 0.0005 - _LEFT) / (_RIGHT - _LEFT) * (master.width_px - 48)) + 24
+    seam_column = [_ink_at(walls, seam_x, y) for y in range(80)]
+
+    assert any(value < 128 for value in seam_column), (
+        "两段描边接缝处的那一列全是白的——量化缝没补上，印出来就是一条白发丝"
+    )
+
+
+def test_a_step_between_parallel_strokes_is_not_bridged() -> None:
+    """平行而不共线的两段之间一像素也不补——那是台阶（飘窗那种），不是接缝。"""
+    step_gap_at = 0.5
+    right_edge = 0.86
+    steps = [
+        PlanWall(
+            axis="vertical",
+            position_ratio=0.83,
+            start_ratio=0.3,
+            end_ratio=step_gap_at,
+            thickness_ratio=_THICKNESS,
+        ),
+        PlanWall(
+            axis="vertical",
+            position_ratio=0.845,
+            start_ratio=step_gap_at + 0.001,
+            end_ratio=0.7,
+            thickness_ratio=_THICKNESS,
+        ),
+    ]
+    master = render_plan_master(
+        _geometry(outline=steps, plan_box=(_LEFT, _TOP, right_edge, _BOTTOM))
+    )
+    walls = Image.open(io.BytesIO(master.walls_png))
+
+    # 空当带：两段 run 的端点之间、横跨两条线的墙带并集——补了任何一笔墨都会被抓到
+    scale = (master.width_px - 48) / ((right_edge - _LEFT) * _FRAME[0])
+    y_lo = int((step_gap_at * _FRAME[1] - _TOP * _FRAME[1]) * scale + 24) + 1
+    y_hi = int(((step_gap_at + 0.001) * _FRAME[1] - _TOP * _FRAME[1]) * scale + 24) - 1
+    x_lo = int(((0.83 - _THICKNESS / 2 - _LEFT) * _FRAME[0]) * scale + 24)
+    x_hi = int(((0.845 + _THICKNESS / 2 - _LEFT) * _FRAME[0]) * scale + 24) + 1
+    assert y_lo <= y_hi, "样例没造出空当：两段 run 的端点之间连一行都不剩"
+    stray_ink = [
+        (x, y)
+        for y in range(y_lo, y_hi + 1)
+        for x in range(x_lo, x_hi + 1)
+        if _ink_at(walls, x, y) < 128
+    ]
+    assert not stray_ink, (
+        f"台阶空当里被补了墨 {stray_ink[:4]}——不共线的两段之间不是接缝，补墨就是造墙"
+    )
+
+
 def test_outline_within_half_a_wall_leaves_the_grid_wall_alone() -> None:
     """两份描边差在半个墙厚以内是常态，一个坐标不动——校准只在两份互相矛盾时出手。"""
     nudged = [
