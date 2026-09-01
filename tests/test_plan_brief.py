@@ -6,15 +6,21 @@ import io
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from render2d_worker.cjk_font import CJK_FONT_CANDIDATES, CjkFontMissingError, find_cjk_font
 from render2d_worker.models import PlanMaster, PlanNote, RoomAnchor
 from render2d_worker.plan_brief import (
     BRIEF_STYLE_BLUEPRINT,
+    BRIEF_STYLE_BLUEPRINT_HATCH_RIGHT,
+    BRIEF_STYLE_BLUEPRINT_POCHE_BOTTOM,
+    BRIEF_STYLE_BLUEPRINT_POCHE_RIGHT,
     BRIEF_STYLE_DEFAULT,
     BRIEF_STYLE_PRECISION,
     BRIEF_STYLE_TECH,
+    BriefStyle,
     PlanBriefError,
+    _share_label,
     render_plan_brief,
 )
 
@@ -84,11 +90,14 @@ def test_default_style_row_is_pinned_to_the_shipped_look() -> None:
     assert style.room_zone_rgbs == ((236, 236, 236),)
     assert style.wall_ink_rgb == (0, 0, 0)
     assert style.wall_core_rgb is None
+    assert style.wall_hatch_step_px is None
+    assert style.wall_hatch_rgb is None
     assert style.grid_step_px is None
     assert style.wall_glow_rgb is None
     assert style.label_ink_rgb == (26, 26, 26)
     assert style.label_halo_rgb == (255, 255, 255)
     assert style.note_ink_rgb == (26, 26, 26)
+    assert style.sheet is None
 
 
 def test_not_passing_a_style_is_the_default_row() -> None:
@@ -110,6 +119,94 @@ def test_style_variants_change_the_look_but_not_the_information() -> None:
         assert styled.image_png != default.image_png, f"{style.name} 画出来和默认一个样"
         assert (styled.width_px, styled.height_px) == (default.width_px, default.height_px)
         assert styled.note_count == default.note_count
+
+
+_SHEET_STYLES = (
+    BRIEF_STYLE_BLUEPRINT_POCHE_BOTTOM,
+    BRIEF_STYLE_BLUEPRINT_HATCH_RIGHT,
+    BRIEF_STYLE_BLUEPRINT_POCHE_RIGHT,
+)
+_SHARES = {"客厅": 0.62, "阳台": 0.38}
+
+
+def test_sheet_styles_widen_the_page_and_keep_every_note() -> None:
+    """整页版式（2026-09-01 制图蓝图裁决）：左右真留了白（页面比母版宽），批注一条不少。"""
+    master, notes = _master(), _NOTES
+    default = render_plan_brief(master, notes)
+
+    for style in _SHEET_STYLES:
+        styled = render_plan_brief(master, notes, style, room_shares=_SHARES)
+        assert styled.width_px > default.width_px, f"{style.name} 左右没留白"
+        assert styled.note_count == default.note_count
+
+
+def test_sheet_render_is_byte_deterministic() -> None:
+    master, notes = _master(), _NOTES
+
+    for style in _SHEET_STYLES:
+        first = render_plan_brief(master, notes, style, room_shares=_SHARES)
+        second = render_plan_brief(master, notes, style, room_shares=_SHARES)
+        assert first.image_png == second.image_png, f"{style.name} 两跑字节不同"
+
+
+def test_missing_shares_drop_the_table_but_not_the_page() -> None:
+    """占比数据拿不到＝那一块不画（宁缺不编），页面其余照出。"""
+    master, notes = _master(), _NOTES
+
+    with_table = render_plan_brief(
+        master, notes, BRIEF_STYLE_BLUEPRINT_POCHE_BOTTOM, room_shares=_SHARES
+    )
+    without = render_plan_brief(master, notes, BRIEF_STYLE_BLUEPRINT_POCHE_BOTTOM)
+    assert without.image_png != with_table.image_png
+
+
+def test_room_share_table_is_all_or_nothing() -> None:
+    """占比给了就必须配得齐：挂错房间、缺一间、值出界，都响亮失败——不画一张读歪的表。"""
+    master, notes = _master(), _NOTES
+    style = BRIEF_STYLE_BLUEPRINT_POCHE_BOTTOM
+
+    with pytest.raises(PlanBriefError, match="书房"):
+        render_plan_brief(master, notes, style, room_shares={"客厅": 0.5, "阳台": 0.3, "书房": 0.2})
+    with pytest.raises(PlanBriefError, match="阳台"):
+        render_plan_brief(master, notes, style, room_shares={"客厅": 0.62})
+    with pytest.raises(PlanBriefError, match="占比不在"):
+        render_plan_brief(master, notes, style, room_shares={"客厅": 1.2, "阳台": 0.38})
+
+
+def test_share_label_prints_percent_like_the_notes_do() -> None:
+    """×100、一位小数、% 紧排——同"比率印给业主用百分数"（2026-08-31 裁决）的口径，
+    与批注正文"占内部面积 19.2%"的印法逐字对得上，一张图上不出两种数。"""
+    assert _share_label(0.1918) == "19.2%"
+    assert _share_label(0.0372) == "3.7%"
+    assert _share_label(0.5) == "50.0%"
+
+
+def test_hatch_is_only_valid_riding_on_a_wall_core() -> None:
+    """剖面纹铺在双线芯里：没有芯、或间距与颜色只给一半，建模时就响——样式配错不进画图。"""
+    with pytest.raises(ValidationError, match="没有芯"):
+        BriefStyle(
+            name="配错的样式：有纹没芯",
+            paper_rgb=(255, 255, 255),
+            room_zone_rgbs=((236, 236, 236),),
+            wall_ink_rgb=(0, 0, 0),
+            label_ink_rgb=(26, 26, 26),
+            label_halo_rgb=(255, 255, 255),
+            note_ink_rgb=(26, 26, 26),
+            wall_hatch_step_px=7,
+            wall_hatch_rgb=(1, 2, 3),
+        )
+    with pytest.raises(ValidationError, match="都给"):
+        BriefStyle(
+            name="配错的样式：纹只给了一半",
+            paper_rgb=(255, 255, 255),
+            room_zone_rgbs=((236, 236, 236),),
+            wall_ink_rgb=(0, 0, 0),
+            wall_core_rgb=(180, 180, 180),
+            label_ink_rgb=(26, 26, 26),
+            label_halo_rgb=(255, 255, 255),
+            note_ink_rgb=(26, 26, 26),
+            wall_hatch_step_px=7,
+        )
 
 
 def test_missing_cjk_font_fails_loud_instead_of_drawing_tofu() -> None:
