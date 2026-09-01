@@ -7,8 +7,14 @@ import io
 import pytest
 from PIL import Image
 
-from render2d_worker.models import FloorplanGeometry, PlanOpening, PlanWall, RoomOutline
-from render2d_worker.plan_master import PlanMasterError, render_plan_master
+from render2d_worker.models import (
+    FloorplanGeometry,
+    PlanOpening,
+    PlanWall,
+    PlanWallBand,
+    RoomOutline,
+)
+from render2d_worker.plan_master import PlanMasterError, render_plan_master, room_anchors_json
 
 _FRAME = (1000, 1000)
 _LEFT, _TOP, _RIGHT, _BOTTOM = 0.2, 0.2, 0.8, 0.8
@@ -388,3 +394,118 @@ def test_outline_within_half_a_wall_leaves_the_grid_wall_alone() -> None:
     left_px, right_px = _outer_wall_widths_px(master.walls_png, 0.5)
 
     assert right_px > left_px, "两份只差一点点时该照旧取并集，不该改判成外轮廓那一份"
+
+
+def _middle_run_px(walls_png: bytes, y_ratio: float) -> tuple[int, int]:
+    """某一行上左右外墙之间那道墙带：(起点 x, 宽度 px)。量按段砌出来的隔墙就是量这个。"""
+    walls = Image.open(io.BytesIO(walls_png))
+    y = round((y_ratio - _TOP) / (_BOTTOM - _TOP) * (walls.height - 48)) + 24
+    runs = _ink_runs_px(walls, y)
+    assert len(runs) == 3, f"这一行上该有左外墙、隔墙、右外墙三段：{runs}"
+    return runs[1]
+
+
+def test_banded_wall_lays_each_measured_band_with_the_still_face() -> None:
+    """按段厚度直接砌：每段照实测的两面画，突变处**数值没动的那一面**在图上也不动。
+
+    次卧右外墙（角上 22px、其余 12px，东面对齐）与玄关交界（12px 收成 6px，西面对齐）
+    都是这个形态——位置加厚度的还原会把面对齐画丢，所以砌法必须吃两面。
+    """
+    bands = [
+        PlanWallBand(start_ratio=_TOP, end_ratio=0.5, face_low_ratio=0.495, face_high_ratio=0.505),
+        PlanWallBand(
+            start_ratio=0.5, end_ratio=_BOTTOM, face_low_ratio=0.485, face_high_ratio=0.505
+        ),
+    ]
+    base = _geometry()
+    walls = [
+        wall.model_copy(update={"bands": bands})
+        if wall.axis == "vertical" and wall.position_ratio == _PARTITION_X
+        else wall
+        for wall in base.walls
+    ]
+    master = render_plan_master(base.model_copy(update={"walls": walls}))
+
+    upper_x, upper_w = _middle_run_px(master.walls_png, 0.35)
+    lower_x, lower_w = _middle_run_px(master.walls_png, 0.65)
+
+    assert lower_w == pytest.approx(upper_w * 2, abs=2), "下半段实测厚一倍，砌出来就该厚一倍"
+    assert upper_x + upper_w == lower_x + lower_w, "高位面（东面）对齐：加厚的量全该鼓向西面"
+    assert upper_x != lower_x, "西面该动而没动——两段画成同一条带子，段厚没被吃进来"
+
+
+def test_measured_band_trims_a_borrowed_outline_thickness_where_they_overlap() -> None:
+    """外轮廓借来的厚度描在**量得到**的墙上时，重叠的那部分改用实测段带，其余原样。
+
+    来路：玄关入口内凹边（2026-09-01）——外轮廓量不到墙像素、借全图中位数当厚度，
+    把实测 6px 的墙描成 12px，两侧各多出一条黑边。段带够不着的地方（门洞那截）
+    照旧按借来的厚度画：那儿兜底仍是唯一来路，裁掉等于把户型画漏。
+    """
+    borrowed = PlanWall(
+        axis="vertical",
+        position_ratio=_PARTITION_X,
+        start_ratio=_TOP,
+        end_ratio=_BOTTOM,
+        thickness_ratio=0.03,
+    )
+    measured = PlanWall(
+        axis="vertical",
+        position_ratio=_PARTITION_X,
+        start_ratio=0.4,
+        end_ratio=0.6,
+        thickness_ratio=0.01,
+        bands=[
+            PlanWallBand(
+                start_ratio=0.4, end_ratio=0.6, face_low_ratio=0.495, face_high_ratio=0.505
+            )
+        ],
+    )
+    master = render_plan_master(
+        _geometry(walls=[*_outer_walls(), measured], outline=[*_outer_walls(), borrowed])
+    )
+
+    _, trimmed_w = _middle_run_px(master.walls_png, 0.5)
+    _, borrowed_w = _middle_run_px(master.walls_png, 0.3)
+
+    assert trimmed_w <= 30, f"段带盖到的那截还是 {trimmed_w}px 宽——借来的厚度没让位给实测"
+    assert borrowed_w >= 70, f"段带够不着的那截只剩 {borrowed_w}px——把兜底也裁掉了，户型画漏"
+
+
+_PINNED_DISPATCH_SHA256 = {
+    "plan-master.png": "17ff6be3e3097e9691bed3d93d203bd1fa07d3cc26e667453bb81456c6bc81df",
+    "plan-walls.png": "884edddf16f0d34a29da25681b6e2ab05b63dc09e17cca2322967d4e5177a562",
+    "plan-rooms-mask.png": "8ad59cd6149feb59dca19245f9a3ec67027814fbbd2e72a08f550570c2a347a2",
+    "plan-rooms.json": "2e9e82160d3d115487503dde8ab07775ad48c7f5bb4d85ec24813e74142242b0",
+}
+"""无段厚的真派发在按段厚度改造当天（2026-09-01，Pillow 版本由 uv.lock 钉住）的产物哈希。
+Pillow 升级会挪 PNG 编码器的字节——那时要**有意识地**重钉，而不是顺手改数。"""
+
+
+def test_bandless_dispatch_renders_byte_identical_to_the_pinned_run() -> None:
+    """旧派发（无段厚数据）渲染逐字节不变——按段厚度只许改带段的数据，兜底路径一根线不动。
+
+    吃的是 `_iteration/` 里 2026-08-31 真跑的派发原件（正文冻结的日志附件，不是测试造的样本）：
+    "网格/外轮廓校准 + 接缝桥接"那整套兜底逻辑的行为由这四个哈希钉死。
+    """
+    import hashlib
+    import json
+    from pathlib import Path
+
+    dispatch = json.loads(
+        (
+            Path(__file__).parent.parent
+            / "_iteration/run-2026-08-31-plan-2d-render-to-oss/dispatch.json"
+        ).read_text(encoding="utf-8")
+    )
+    master = render_plan_master(FloorplanGeometry.model_validate(dispatch["geometry"]))
+
+    produced = {
+        "plan-master.png": master.master_png,
+        "plan-walls.png": master.walls_png,
+        "plan-rooms-mask.png": master.rooms_png,
+        "plan-rooms.json": room_anchors_json(master.rooms),
+    }
+    for artifact, pinned in _PINNED_DISPATCH_SHA256.items():
+        assert hashlib.sha256(produced[artifact]).hexdigest() == pinned, (
+            f"{artifact} 与钉住的字节不同——无段厚兜底路径被动到了"
+        )

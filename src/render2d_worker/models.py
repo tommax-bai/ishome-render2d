@@ -25,12 +25,31 @@ class _GeometryModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
 
+class PlanWallBand(_GeometryModel):
+    """墙上的一段实测墙带：同段内一个厚度，墨宽一变就换段（产出侧按源图逐点实测分的段）。
+
+    `start_ratio`/`end_ratio` 沿墙方向，相邻两段共用边界、拼起来盖满整段墙；
+    `face_low_ratio`/`face_high_ratio` 是墙带两面的位置（与 `position_ratio` 同分母），
+    厚度＝两面之差。**面对齐直接写在数值里**：突变处哪一面数值不变，哪一面就是没动的——
+    画的时候照两面画，不做"中心 ± 半厚"的还原，还原就把面对齐丢了。
+    """
+
+    start_ratio: float
+    end_ratio: float
+    face_low_ratio: float
+    face_high_ratio: float
+
+
 class PlanWall(_GeometryModel):
     """一段墙：轴向、所在位置、起讫、墙厚，全部归一化到整图（0~1，左上角为原点）。
 
     `axis` 为 `vertical` 时 `position_ratio` 是 x、`start_ratio`/`end_ratio` 是 y 的起讫，
     **`thickness_ratio` 按图宽归一**；`horizontal` 时全部反过来（厚度按图高归一）。
     两个方向除的不是同一个数，所以还原形状必须用 :attr:`FloorplanGeometry.frame_width_px`。
+
+    `bands` 是产出侧**按段实测的厚度**（2026-09-01 两轮线稿定罪后补的：一条线一个厚度在
+    厚度沿长度变的墙上必然失真）。有段就照段砌（`plan_master._band_walls`）；没段（旧数据、
+    或整段压在墙线路口上量不出）走旧画法——位置加厚度，外轮廓校准兜底。
     """
 
     axis: PlanAxis
@@ -38,6 +57,7 @@ class PlanWall(_GeometryModel):
     start_ratio: float
     end_ratio: float
     thickness_ratio: float
+    bands: list[PlanWallBand] = Field(default_factory=list)
 
 
 class PlanOpening(_GeometryModel):

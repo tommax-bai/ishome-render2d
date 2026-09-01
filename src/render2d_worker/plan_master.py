@@ -171,6 +171,79 @@ def _outline_on_same_line(geometry: FloorplanGeometry, wall: PlanWall) -> list[P
     ]
 
 
+def _band_walls(wall: PlanWall) -> list[PlanWall]:
+    """一段带实测厚度的墙 → 按段各砌一条墙带。
+
+    位置与厚度直接从两面来（中心＝两面中点、厚度＝两面之差），**不做"中心 ± 半厚"的还原**：
+    面对齐信息就在两面的数值里（突变处哪面不动哪面数值不变），还原成中心加厚度再画，
+    玄关交界那种"变薄且右面内收"的墙就会被画成两边同时收。相邻段共用边界，段间没有缝。
+    """
+    return [
+        wall.model_copy(
+            update={
+                "position_ratio": (band.face_low_ratio + band.face_high_ratio) / 2,
+                "thickness_ratio": band.face_high_ratio - band.face_low_ratio,
+                "start_ratio": band.start_ratio,
+                "end_ratio": band.end_ratio,
+                "bands": [],
+            }
+        )
+        for band in wall.bands
+    ]
+
+
+def _outline_pieces(geometry: FloorplanGeometry, stroke: PlanWall) -> list[PlanWall]:
+    """一段外轮廓要砌的各截：与**实测段带**矛盾的重叠部分改用段带的两面，其余原样。
+
+    外轮廓量不到墙像素的段借全图中位数当厚度（飘窗细线被开运算抹掉那一类的兜底）；
+    借来的厚度描在**量得到**的墙上就是失真——玄关入口内凹边，外轮廓按 12px 描，
+    实测段带 6px，两侧各多出 3px 黑边。段带是逐点实测的，同一条边上它说了算；
+    矛盾与否用与网格校准同一把尺（越出超过半个段厚，`_OUTLINE_OVERRIDE_SHARE`）。
+
+    **只裁矛盾的重叠部分**：段带够不着的地方（门洞上方、飘窗台阶）一个坐标不动——
+    借厚度的兜底在那儿仍是唯一来路，裁掉等于把户型画漏。各截共用边界，不留缝。
+    """
+    stroke_low, stroke_high = _line_band([stroke])
+    takeovers: list[tuple[float, float, float, float]] = []
+    for wall in geometry.walls:
+        if not wall.bands or wall.axis != stroke.axis:
+            continue
+        if abs(wall.position_ratio - stroke.position_ratio) >= _SAME_LINE_TOLERANCE:
+            continue
+        for band in wall.bands:
+            start = max(band.start_ratio, stroke.start_ratio)
+            end = min(band.end_ratio, stroke.end_ratio)
+            if end <= start:
+                continue
+            overshoot = max(band.face_low_ratio - stroke_low, 0.0) + max(
+                stroke_high - band.face_high_ratio, 0.0
+            )
+            if overshoot > (band.face_high_ratio - band.face_low_ratio) * _OUTLINE_OVERRIDE_SHARE:
+                takeovers.append((start, end, band.face_low_ratio, band.face_high_ratio))
+    if not takeovers:
+        return [stroke]
+
+    pieces: list[PlanWall] = []
+    at = stroke.start_ratio
+    for start, end, face_low, face_high in sorted(takeovers):
+        if start > at:
+            pieces.append(stroke.model_copy(update={"start_ratio": at, "end_ratio": start}))
+        pieces.append(
+            stroke.model_copy(
+                update={
+                    "position_ratio": (face_low + face_high) / 2,
+                    "thickness_ratio": face_high - face_low,
+                    "start_ratio": max(start, at),
+                    "end_ratio": end,
+                }
+            )
+        )
+        at = max(at, end)
+    if at < stroke.end_ratio:
+        pieces.append(stroke.model_copy(update={"start_ratio": at, "end_ratio": stroke.end_ratio}))
+    return pieces
+
+
 def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
     """母版实际要砌的全部墙段：**外轮廓原样**，网格墙按外轮廓校准过。
 
@@ -184,6 +257,13 @@ def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
     飘窗那种台阶），它逐段给厚度，网格墙一条线只给一个厚度，这个数在厚度沿长度变化的边上
     只对其中一段成立。
 
+    **带段厚的墙不进这套校准**（2026-09-01 产出侧按段给厚度之后）：段厚是逐点实测的，
+    比外轮廓的逐段中位数还细，直接照 :func:`_band_walls` 砌。此时裁决反过来——
+    **外轮廓与实测段带在同一条边上矛盾时，重叠的那部分改用段带的两面**
+    （:func:`_outline_pieces`，同一把尺 `_OUTLINE_OVERRIDE_SHARE`）：玄关入口内凹边上，
+    外轮廓把借来的 12px 厚度描在实测 6px 的墙上，多出来的黑边正是"厚度失真"剩下的那一半。
+    校准整套只对没有段厚的旧数据兜底——旧派发照旧画，逐字节不变（守门测试钉住）。
+
     **只换墙带、不删段**（`outline` 一段不动，网格墙一段不少），所以：
     - 只在 `outline` 里的台阶（飘窗那种）照旧画——补外轮廓解决的问题不会倒退；
     - 网格墙的起讫原样保留；
@@ -192,8 +272,15 @@ def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
     拼完最后把同线相邻段之间的量化接缝补上（:func:`_seam_bridges`）——网格墙能盖住其中
     一部分，盖不住的那些印出来就是白发丝。
     """
-    masonry = list(geometry.outline)
+    masonry: list[PlanWall] = []
+    for stroke in geometry.outline:
+        masonry.extend(_outline_pieces(geometry, stroke))
     for wall in geometry.walls:
+        if wall.bands:
+            # 按段实测厚度：直接照两面砌，不再拿外轮廓校准——两份都是从像素量的，
+            # 段厚是逐点实测、比整条线一个数的投票更细，轮不到粗的替细的定夺
+            masonry.extend(_band_walls(wall))
+            continue
         same_line = _outline_on_same_line(geometry, wall)
         # 外轮廓没把这段从头描到尾，就轮不到它替这段定厚度
         if not same_line or not (
