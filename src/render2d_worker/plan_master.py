@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Sequence
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
@@ -61,7 +62,19 @@ _OUTLINE_PROBE_PX = 5
 """量外圈时往里剥几像素取边界带。"""
 
 _SAME_LINE_TOLERANCE = 0.006
-"""判"洞在哪道墙上"时位置的容差：外轮廓给的是墙带中心线，与网格投票出来的线差半个墙厚是常态。"""
+"""判"洞在哪道墙上"、"两处描的是不是同一条边"时位置的容差：外轮廓给的是墙带中心线，
+与网格投票出来的线差半个墙厚是常态。"""
+
+_OUTLINE_OVERRIDE_SHARE = 0.5
+"""同一条边的两份描边差多少才算**互相矛盾**：网格墙带越出外轮廓墙带的部分超过半个外轮廓墙厚。
+
+判据取"半个墙厚"，用的是 `_SAME_LINE_TOLERANCE` 已经写下的同一把尺——两处描边**差半个墙厚
+是常态**，差到比这还多就不是常态了，是两份数在同一条边上说了不同的话。
+
+**首个真实样例实测**（92㎡ 三室，27 段网格墙与外轮廓同线）：除次卧右外墙那两段外，越出量
+全部 ≤ 5.8px，而外轮廓墙带 21~30px（半个＝10.5~15px）——够不着门槛；次卧右外墙那两段越出
+**19.8px**、外轮廓墙带 28px（半个＝14px），越过门槛。两侧留的余量都在 2.4 倍以上，分得开。
+**样本只有一张**，复看时点＝拿到第二批样本时（同 `MIN_OUTLINE_CLOSURE_RATIO`）。"""
 
 _OUTLINE_TOLERANCE_PX = 9
 """墙压在边界上的容差：墙心线与房间边界差几像素是画法本身带来的，不是漏墙。"""
@@ -127,21 +140,90 @@ def _wall_thickness_px(frame: _Frame, wall: PlanWall) -> float:
     return frame.across_y(wall.thickness_ratio)
 
 
-def _lay_solid_walls(frame: _Frame, geometry: FloorplanGeometry) -> Image.Image:
+def _line_band(walls: Sequence[PlanWall]) -> tuple[float, float]:
+    """一组同线墙段合起来占的墙带（横向的归一化起讫，不含长度方向）。"""
+    return (
+        min(wall.position_ratio - wall.thickness_ratio / 2 for wall in walls),
+        max(wall.position_ratio + wall.thickness_ratio / 2 for wall in walls),
+    )
+
+
+def _outline_on_same_line(geometry: FloorplanGeometry, wall: PlanWall) -> list[PlanWall]:
+    """外轮廓里与这段网格墙**描同一条边**的那些段：同轴、位置在容差内、起讫有交。"""
+    return [
+        segment
+        for segment in geometry.outline
+        if segment.axis == wall.axis
+        and abs(segment.position_ratio - wall.position_ratio) < _SAME_LINE_TOLERANCE
+        and min(segment.end_ratio, wall.end_ratio) > max(segment.start_ratio, wall.start_ratio)
+    ]
+
+
+def _masonry(geometry: FloorplanGeometry) -> list[PlanWall]:
+    """母版实际要砌的全部墙段：**外轮廓原样**，网格墙按外轮廓校准过。
+
+    外轮廓与网格墙是同一圈外墙的两份描边（`outline` 逐段描、跟着台阶走，`walls` 是网格投票，
+    一条线只有一个厚度）。两份**在同一条边上矛盾**时，此前的画法是取并集——并集等于"厚度按
+    两份里粗的那一份算"，于是：网格投票把一条实际 12px 的外墙投成 22px，母版就把它画成两倍宽；
+    而这条粗带子沿长度断开的地方只剩下窄的外轮廓那一笔，缝就露出来了（业主当场看出来的
+    "特别宽 + 中间一条白缝 + 两端错开"，2026-09-01）。
+
+    **矛盾时以外轮廓为准**，理由是外轮廓本来就是为外墙补的（2026-08-31：网格投票表达不了
+    飘窗那种台阶），它逐段给厚度，网格墙一条线只给一个厚度，这个数在厚度沿长度变化的边上
+    只对其中一段成立。
+
+    **只换墙带、不删段**（`outline` 一段不动，网格墙一段不少），所以：
+    - 只在 `outline` 里的台阶（飘窗那种）照旧画——补外轮廓解决的问题不会倒退；
+    - 网格墙的起讫原样保留，外轮廓分段之间那一像素的缝仍由它盖住；
+    - 外轮廓够不着的边（内墙全部在此）一个坐标不动。
+    """
+    masonry = list(geometry.outline)
+    for wall in geometry.walls:
+        same_line = _outline_on_same_line(geometry, wall)
+        # 外轮廓没把这段从头描到尾，就轮不到它替这段定厚度
+        if not same_line or not (
+            min(segment.start_ratio for segment in same_line) <= wall.start_ratio
+            and max(segment.end_ratio for segment in same_line) >= wall.end_ratio
+        ):
+            masonry.append(wall)
+            continue
+        low, high = _line_band(same_line)
+        wall_low, wall_high = _line_band([wall])
+        overshoot = max(low - wall_low, 0.0) + max(wall_high - high, 0.0)
+        if overshoot <= (high - low) * _OUTLINE_OVERRIDE_SHARE:
+            masonry.append(wall)  # 两份对得上，照旧
+            continue
+        masonry.append(
+            wall.model_copy(
+                update={"position_ratio": (low + high) / 2, "thickness_ratio": high - low}
+            )
+        )
+    return masonry
+
+
+def _lay_solid_walls(frame: _Frame, masonry: Sequence[PlanWall]) -> Image.Image:
     """只砌墙不开洞。外圈闭合率对着这一张量——**窗和门都是墙上的构造，不是墙没了**；
-    对着开完洞的图量，一户飘窗多的房子会被自己的窗判成外墙漏风。"""
+    对着开完洞的图量，一户飘窗多的房子会被自己的窗判成外墙漏风。
+
+    量的是 `_masonry` 那一份而不是原始几何：闭合率是母版**对自己画出来的东西**的自证数，
+    对着一份没画出来的墙量等于自己给自己发合格证。"""
     layer = Image.new("L", (frame.width_px, frame.height_px), _PAPER)
-    _brush_walls(frame, geometry, ImageDraw.Draw(layer))
+    _brush_walls(frame, masonry, ImageDraw.Draw(layer))
     return layer
 
 
-def _brush_walls(frame: _Frame, geometry: FloorplanGeometry, pen: ImageDraw.ImageDraw) -> None:
-    """外轮廓与网格墙一起砌。两处都是墙，重合的段画两遍是同一笔黑。"""
-    for wall in (*geometry.outline, *geometry.walls):
+def _brush_walls(frame: _Frame, masonry: Sequence[PlanWall], pen: ImageDraw.ImageDraw) -> None:
+    """把 `_masonry` 定下来的墙段一段段砌上。重合的段画两遍是同一笔黑。"""
+    for wall in masonry:
         pen.rectangle(_band(frame, wall, _wall_thickness_px(frame, wall)), fill=_WALL_INK)
 
 
-def _lay_walls(frame: _Frame, geometry: FloorplanGeometry, ground: Image.Image) -> Image.Image:
+def _lay_walls(
+    frame: _Frame,
+    geometry: FloorplanGeometry,
+    masonry: Sequence[PlanWall],
+    ground: Image.Image,
+) -> Image.Image:
     """在给定底子上砌墙，然后按洞在哪面墙上分两种画法。
 
     **内墙上的洞断开，外墙上的洞画成窗**。产出侧这一层只分洞在外墙还是内墙、不分门与窗
@@ -158,9 +240,9 @@ def _lay_walls(frame: _Frame, geometry: FloorplanGeometry, ground: Image.Image) 
     """
     layer = ground.copy()
     pen = ImageDraw.Draw(layer)
-    _brush_walls(frame, geometry, pen)
+    _brush_walls(frame, masonry, pen)
     for opening in geometry.openings:
-        thickness_px = _opening_thickness_px(frame, geometry, opening)
+        thickness_px = _opening_thickness_px(frame, masonry, opening)
         if opening.is_on_outer_wall:
             pen.rectangle(_band(frame, opening, thickness_px * _WINDOW_SLIT_SHARE), fill=_PAPER)
             continue
@@ -179,21 +261,21 @@ def _room_ground(frame: _Frame, rooms_mask: Image.Image) -> Image.Image:
 
 
 def _opening_thickness_px(
-    frame: _Frame, geometry: FloorplanGeometry, opening: PlanOpening
+    frame: _Frame, masonry: Sequence[PlanWall], opening: PlanOpening
 ) -> float:
-    """洞所在那道墙有多厚。找不到同位置的墙就按最厚的擦——宁可擦透，别留墙渣。"""
+    """洞所在那道墙有多厚。找不到同位置的墙就按最厚的擦——宁可擦透，别留墙渣。
+
+    量的是砌上去的那一份墙（`_masonry`）：墙带按外轮廓校准之后还照原始厚度擦，会把洞两侧
+    的墙一起啃掉。"""
     same_line = [
         wall
-        for wall in (*geometry.outline, *geometry.walls)
+        for wall in masonry
         if wall.axis == opening.axis
         and abs(wall.position_ratio - opening.position_ratio) < _SAME_LINE_TOLERANCE
     ]
     thickness_px = max(
         (_wall_thickness_px(frame, wall) for wall in same_line),
-        default=max(
-            (_wall_thickness_px(frame, wall) for wall in (*geometry.outline, *geometry.walls)),
-            default=0.0,
-        ),
+        default=max((_wall_thickness_px(frame, wall) for wall in masonry), default=0.0),
     )
     return max(thickness_px, _MIN_WALL_PX) + 2 * _OPENING_BLEED_PX
 
@@ -275,11 +357,12 @@ def render_plan_master(
         raise PlanMasterError([f"长边 {long_side_px}px 装不下两边各 {margin_px}px 的留白"])
 
     frame = _Frame(geometry, long_side_px, margin_px)
+    masonry = _masonry(geometry)
     rooms, anchors = _draw_rooms(frame, geometry)
     paper = Image.new("L", (frame.width_px, frame.height_px), _PAPER)
-    walls_only = _lay_walls(frame, geometry, paper)
+    walls_only = _lay_walls(frame, geometry, masonry, paper)
 
-    closure = _outline_closure_ratio(rooms, _lay_solid_walls(frame, geometry))
+    closure = _outline_closure_ratio(rooms, _lay_solid_walls(frame, masonry))
     if closure < MIN_OUTLINE_CLOSURE_RATIO:
         raise PlanMasterError(
             [
@@ -291,7 +374,7 @@ def render_plan_master(
 
     return PlanMaster(
         # 母版：屋里淡灰、墙黑、洞断开——人一眼看得懂，也够当结构条件图用
-        master_png=_to_png(_lay_walls(frame, geometry, _room_ground(frame, rooms))),
+        master_png=_to_png(_lay_walls(frame, geometry, masonry, _room_ground(frame, rooms))),
         # 墙体图层：纯墙，白纸黑墙不带房间底色，遮罩比对与配准吃这一张
         walls_png=_to_png(walls_only),
         rooms_png=_to_png(rooms),
