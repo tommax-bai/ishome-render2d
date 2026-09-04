@@ -24,13 +24,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
 from temporalio import activity
 
 from render2d_worker.cjk_font import CjkFontMissingError
-from render2d_worker.models import FloorplanGeometry, PlanNote
+from render2d_worker.models import FloorplanGeometry, PlanCopy, PlanNote
 from render2d_worker.plan_brief import PlanBriefError, render_plan_brief
 from render2d_worker.plan_master import PlanMasterError, render_plan_master, room_anchors_json
 from render2d_worker.plan_store import (
@@ -43,9 +44,14 @@ from render2d_worker.plan_store import (
     PlanStoreError,
     content_sha256_of,
 )
+from render2d_worker.style_caption import StyleCaptionError, render_caption
 
 ACTIVITY_PLAN_2D_RENDER = "plan-2d-render"
 """contracts 注册名（#4）。字符串在此声明一次，worker 与守门测试都引它。"""
+
+ACTIVITY_STYLE_CAPTION_OVERLAY = "style-caption-overlay"
+"""contracts 注册名（#18，2026-09-04 入册）：情绪图叠字——风格图（桶里）+ 页面文案 → 成品
+写回同前缀。"""
 
 
 class PlanRenderer:
@@ -143,6 +149,55 @@ class PlanRenderer:
             "note_count": len(notes),
         }
 
+    @activity.defn(name=ACTIVITY_STYLE_CAPTION_OVERLAY)
+    async def overlay_style_caption(self, request: dict[str, Any]) -> dict[str, Any]:
+        """风格图（桶里的键）+ 页面文案 → 确定性叠上标题/总结/贴士 → 写回同前缀，返回**对象键**。
+
+        入参不透明字典：`style_object_key`（imagegen `atmosphere-visual` 回执里的 image_object_key）
+        与 `copy`（genpipe `plan-copy-write` 回执里的 {title, summary, tips}）。
+        文案在产它的那一侧机检过了（数字必须在事实清单里），这一层只画不判。
+        **版面量不出足够的连续空白即整张失败**——失败形态是"重生成一张底图"，不是把字压在画面上。
+        """
+        style_object_key = str(request.get("style_object_key") or "")
+        if not style_object_key:
+            return _failed("gate-missing-style-key", "没有 style_object_key：不知道给哪张图叠字")
+        try:
+            copy = PlanCopy.model_validate(request.get("copy"))
+        except (ValueError, TypeError) as e:
+            return _failed("gate-bad-copy", f"页面文案解析失败：{e}")
+        if not copy.title.strip() or not copy.summary.strip() or not copy.tips:
+            return _failed("gate-empty-copy", "标题、总结、贴士三样缺一：叠上去的是半张卡片")
+
+        try:
+            style_png = await asyncio.to_thread(self._store.get_upload_object, style_object_key)
+        except PlanStoreError as e:
+            return _violations("plan-store-failed", e.details)
+        try:
+            captioned = await asyncio.to_thread(render_caption, style_png, copy)
+        except (StyleCaptionError, CjkFontMissingError) as e:
+            return _violations("style-caption-failed", e.details)
+        except OSError as e:
+            return _failed(
+                "gate-bad-style-image", f"风格图读不成图片（键 {style_object_key}）：{e}"
+            )
+        try:
+            image_object_key = await asyncio.to_thread(
+                self._store.put_captioned_visual, style_object_key, captioned.image_png
+            )
+        except PlanStoreError as e:
+            return _violations("plan-store-failed", e.details)
+        return {
+            "verdict": "ok",
+            "bucket": self._store.bucket_name,
+            "image_object_key": image_object_key,
+            "style_object_key": style_object_key,
+            "content_type": "image/png",
+            "width_px": captioned.width_px,
+            "height_px": captioned.height_px,
+            "top_blank_px": captioned.top_blank_px,
+            "bottom_blank_px": captioned.bottom_blank_px,
+        }
+
 
 def _failed(check: str, detail: str) -> dict[str, Any]:
     return {"verdict": "failed", "violations": [{"check": check, "detail": detail}]}
@@ -161,4 +216,7 @@ def activity_registry(renderer: PlanRenderer) -> dict[str, Callable[..., Any]]:
 
     键与 contracts 注册表逐字一致（tests/test_activity_registry.py 断言）。
     """
-    return {ACTIVITY_PLAN_2D_RENDER: renderer.render_plan_2d}
+    return {
+        ACTIVITY_PLAN_2D_RENDER: renderer.render_plan_2d,
+        ACTIVITY_STYLE_CAPTION_OVERLAY: renderer.overlay_style_caption,
+    }

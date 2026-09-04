@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from render2d_worker.activities import ACTIVITY_PLAN_2D_RENDER, PlanRenderer, activity_registry
+from render2d_worker.activities import (
+    ACTIVITY_PLAN_2D_RENDER,
+    ACTIVITY_STYLE_CAPTION_OVERLAY,
+    PlanRenderer,
+    activity_registry,
+)
 from render2d_worker.plan_store import (
     BRIEF_ARTIFACT,
     MASTER_ARTIFACT,
@@ -231,7 +236,7 @@ async def test_bad_input_fails_loud(overrides: dict[str, Any], expected_check: s
 def test_activity_registry_exposes_the_contracts_name() -> None:
     result = activity_registry(_renderer(_StubPlanStore()))
 
-    assert list(result) == [ACTIVITY_PLAN_2D_RENDER]
+    assert set(result) == {ACTIVITY_PLAN_2D_RENDER, ACTIVITY_STYLE_CAPTION_OVERLAY}
 
 
 def test_object_keys_are_derived_not_recorded() -> None:

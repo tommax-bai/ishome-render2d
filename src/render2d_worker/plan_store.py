@@ -59,6 +59,11 @@ ROOM_ANCHORS_ARTIFACT = "plan-rooms.json"
 BRIEF_ARTIFACT = "plan-brief.png"
 """功能说明图：母版 + 房间名 + 批注，发给业主的成品。"""
 
+CAPTIONED_SUFFIX = "-captioned.png"
+"""情绪图叠字成品的键：在风格图键上去掉扩展名、接这一段（`atmosphere-cream-journal.jpg` →
+`atmosphere-cream-journal-captioned.png`）。**从输入键派生，不另铸名**：叠字前后是同一张底图的
+两种形态，键的形态说的就是这层关系；ext 固定 png——叠字后由确定性绘制层重新编码。"""
+
 _CONTENT_TYPE_BY_SUFFIX = {
     ".png": "image/png",
     ".json": "application/json; charset=utf-8",
@@ -68,6 +73,9 @@ _CONTENT_TYPE_BY_SUFFIX = {
 _UPLOAD_ORIGINAL_KEY_PATTERN = re.compile(
     r"^uploads/(?P<content_sha256>[0-9a-f]{64})/original\.(?:" + "|".join(UPLOAD_EXTENSIONS) + r")$"
 )
+
+_UPLOAD_PREFIX_PATTERN = re.compile(r"^uploads/[0-9a-f]{64}/[A-Za-z0-9][A-Za-z0-9._-]*$")
+"""同前缀下任一派生物的键形态（读风格图用）：本仓只读 `uploads/{sha}/` 底下的东西，别的前缀不碰。"""
 """源图键的形态。**认死这一条不放宽**：产物键由它派生，键错一次图就写到别人的前缀底下去了。"""
 
 _ENDPOINT_ENV = "ISHOME_OSS_ENDPOINT"
@@ -97,6 +105,18 @@ def content_sha256_of(floorplan_object_key: str) -> str:
             ]
         )
     return matched.group("content_sha256")
+
+
+def captioned_key_of(style_object_key: str) -> str:
+    """叠字成品的键：从风格图键派生。键不在 `uploads/{sha}/` 底下、或没有扩展名，即失败。"""
+    if not _UPLOAD_PREFIX_PATTERN.match(style_object_key):
+        raise PlanStoreError(
+            [f"风格图键 `{style_object_key}` 不在 uploads/{{sha}}/ 底下：不是本仓该碰的东西"]
+        )
+    stem, dot, _ext = style_object_key.rpartition(".")
+    if not dot or "/" in _ext:
+        raise PlanStoreError([f"风格图键 `{style_object_key}` 没有扩展名：叠字成品的键无从派生"])
+    return stem + CAPTIONED_SUFFIX
 
 
 def plan_artifact_key_of(floorplan_object_key: str, artifact: str) -> str:
@@ -149,6 +169,35 @@ class OssPlanStore:
     @property
     def bucket_name(self) -> str:
         return self._bucket_name
+
+    def get_upload_object(self, object_key: str) -> bytes:
+        """读同前缀下的一件对象（风格图）。键先过形态校验；取不到即失败。"""
+        if not _UPLOAD_PREFIX_PATTERN.match(object_key):
+            raise PlanStoreError(
+                [f"键 `{object_key}` 不在 uploads/{{sha}}/ 底下：本仓不读别处的东西"]
+            )
+        try:
+            payload = self._bucket.get_object(object_key).read()
+        except oss2.exceptions.NoSuchKey as e:
+            raise PlanStoreError(
+                [f"私有桶 `{self._bucket_name}` 里没有 `{object_key}`：上游说出了图、桶里却没有"]
+            ) from e
+        except oss2.exceptions.OssError as e:
+            raise PlanStoreError(
+                [f"从私有桶 `{self._bucket_name}` 取 `{object_key}` 失败：{e}"]
+            ) from e
+        if not isinstance(payload, bytes) or not payload:
+            raise PlanStoreError([f"`{object_key}` 取回来是空的"])
+        return payload
+
+    def put_captioned_visual(self, style_object_key: str, payload: bytes) -> str:
+        """写叠字成品（PNG），键从风格图键派生。写失败即上抛。"""
+        key = captioned_key_of(style_object_key)
+        try:
+            self._bucket.put_object(key, payload, headers={"Content-Type": "image/png"})
+        except oss2.exceptions.OssError as e:
+            raise PlanStoreError([f"图写不进私有桶 `{self._bucket_name}`（键 {key}）：{e}"]) from e
+        return key
 
     def put_artifact(self, floorplan_object_key: str, artifact: str, payload: bytes) -> str:
         """写一件产物，返回对象键。写失败即上抛——不吞、不返回一个指向空气的键。"""
