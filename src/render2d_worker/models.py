@@ -60,11 +60,24 @@ class PlanWall(_GeometryModel):
     bands: list[PlanWallBand] = Field(default_factory=list)
 
 
+OpeningKind = Literal["door", "window", "passage", "entry-door", "unknown"]
+"""洞口类型闭集，**与产出侧逐字一致**（aipipe `genpipe_worker/models.py` 的 `OpeningKind`，
+2026-09-05；三维那侧的同一份对面是 render3d `models.OpeningKind`）。
+
+`passage` 是没有门扇的过口；`entry-door` 是入户门（外轮廓上带门弧的洞，全户唯一）；
+`unknown` 是**推不出**，不是"大概是门"。**本仓不消费这个值**，收下它只为认得
+（见 :attr:`PlanOpening.kind`）——闭集照抄产出侧是因为"认得"也得认对：
+产出侧改了字，这一处不跟着改就该在门禁上响，而不是默默放行一个没人认识的类型。
+"""
+
+
 class PlanOpening(_GeometryModel):
     """墙线上的一个洞：门、窗、或没有门扇的过口。坐标口径同 :class:`PlanWall`。
 
-    **这一层不分门与窗**，只分洞在外墙还是内墙——母版因此把洞画成"墙断开"，不画门扇窗框。
-    要画门扇与窗框得先有门窗之分，时点写死＝产出侧补上门窗识别那一批。
+    **母版这一层仍不分门与窗**，只分洞在外墙还是内墙——洞照旧画成"墙断开"，不画门扇窗框。
+    产出侧 2026-09-05 起给了 `kind`（确定性代码从像素里推：门弧、跨洞平行线），三维那侧
+    已经吃上了（render3d `mesh.resolve_opening_kind`）；母版要不要照类型画门扇窗框是另一件事，
+    **没拍之前 `kind`/`kind_evidence` 只收不用**。
     """
 
     axis: PlanAxis
@@ -76,6 +89,16 @@ class PlanOpening(_GeometryModel):
     """这个洞两侧的房间名。**画图这一侧用不上**（画法只看洞在内墙还是外墙，与通向哪儿无关），
     收下它是因为产出侧给了——`extra="forbid"` 的意思是"多出来的字段说明两侧对不上头"，
     而这一条不是对不上，是产出侧新给的。"""
+
+    kind: OpeningKind = "unknown"
+    """洞口类型，见 :data:`OpeningKind`。**画图这一侧今天不读它**，同 `connects` 只收不用。
+
+    缺省是 `unknown` 不是 `door`：没跑过类型推断的老几何（`_iteration/` 里那批真跑派发原件、
+    以及任何早于 2026-09-05 的产物）读进来就是"不知道"，而不是悄悄全当门。"""
+
+    kind_evidence: str = ""
+    """给出 `kind` 的依据（哪样证据、量到多少）；`unknown` 时写的是为什么推不出。
+    给人读的，不进规则；本仓只收不用。"""
 
 
 class RoomOutline(_GeometryModel):
@@ -111,6 +134,9 @@ class FloorplanGeometry(_GeometryModel):
     openings: list[PlanOpening] = Field(default_factory=list)
     rooms: list[RoomOutline] = Field(default_factory=list)
     cell_coverage_ratio: float = 0.0
+    opening_kind_coverage_ratio: float = 0.0
+    """产出侧洞口类型那一步的自证数：给出了非 `unknown` 类型的洞占全部洞的比例。
+    老产物没有这个数，读作 0。**本仓只收不用**（母版不按类型画），同 `kind`。"""
 
 
 class RoomAnchor(BaseModel):

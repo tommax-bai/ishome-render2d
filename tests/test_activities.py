@@ -214,6 +214,61 @@ async def test_note_on_a_room_the_master_does_not_have_fails_loud() -> None:
     assert store.written == {}
 
 
+def _inner_opening() -> dict[str, Any]:
+    """隔墙上的一个洞（内墙），不动外圈闭合率。"""
+    return {
+        "axis": "vertical",
+        "positionRatio": _PARTITION_X,
+        "startRatio": 0.45,
+        "endRatio": 0.55,
+        "isOnOuterWall": False,
+        "connects": ["客厅", "主卧"],
+    }
+
+
+async def test_geometry_with_opening_kinds_passes_the_gate() -> None:
+    """带洞口类型的几何过得了门禁——2026-09-06 真机整条跑照出来的回归，别把这三个字段删了。
+
+    那天业主发 138 ㎡ 户型图，编排把几何交到 `plan-2d-render`，当场被自己的门禁拦掉
+    （`gate-bad-geometry`，31 条 `extra_forbidden`），母版没画出来、三张图一张没发出去。
+    根因是产出侧（aipipe 几何提取）2026-09-05 加了洞口类型真值——每个洞多出 `kind` 与
+    `kindEvidence`、整份多出 `openingKindCoverageRatio`——而本仓 `extra="forbid"` 不认得。
+
+    **本仓画图用不上这三样**（母版仍把洞画成"墙断开"，不按类型画门扇窗框），
+    加进模型只为认得：`extra="forbid"` 说的是"多出来的字段＝两侧对不上头"，
+    而这三样不是对不上，是产出侧新给的。看着多余就删掉的话，这条真机失效原样复发。
+    """
+    geometry = _geometry()
+    geometry["openings"] = [
+        _inner_opening()
+        | {
+            "kind": "door",
+            "kindEvidence": "门弧：16/16 个采样角压到孤立细线，半径≈0.85 洞宽；洞在内墙上",
+        }
+    ]
+    geometry["openingKindCoverageRatio"] = 0.9333
+    store = _StubPlanStore()
+    result = await _renderer(store).render_plan_2d(_request(geometry=geometry))
+
+    assert result["verdict"] == "ok"
+    assert len(store.written) == 4
+
+
+async def test_geometry_without_opening_kinds_still_passes_the_gate() -> None:
+    """不带类型的老几何照旧过——三样都可选带默认，早于 2026-09-05 的产物不许因此跑不动。
+
+    与上一条成对：新字段加进来不能反过来把老样本挡在门外（`_iteration/` 里那批真跑派发
+    原件就是这个形态）。缺省是 `unknown`/`""`/`0`，不是"大概是门"。
+    """
+    geometry = _geometry()
+    geometry["openings"] = [_inner_opening()]
+    store = _StubPlanStore()
+    result = await _renderer(store).render_plan_2d(_request(geometry=geometry))
+
+    assert result["verdict"] == "ok"
+    assert len(store.written) == 4
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_check"),
     [
