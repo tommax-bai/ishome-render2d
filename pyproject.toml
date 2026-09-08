@@ -76,7 +76,7 @@ root_packages = ["render2d_worker"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "worker|cli → activities → plan_brief|style_caption → plan_master → cjk_font → models 单向"
+name = "worker|cli → activities → activity_log → plan_brief|style_caption → plan_master → cjk_font → models 单向"
 type = "layers"
 # 两个入口同层且互不可见（"|" = independent siblings）：`worker` 是 Temporal 入口，
 # `cli` 是本地画母版的工具。**cli 不许经 activities**——它是不碰 Temporal 与对象存储的那条路，
@@ -84,6 +84,9 @@ type = "layers"
 layers = [
   "worker | cli",
   "activities",
+  # 留痕在 activity 底下、纯库层上头：activity 用它记一进一出，画图那几层看不见它——
+  # 那一层响亮失败靠抛异常，"这一跑留下什么"是调用方的事，不是画图的事。
+  "activity_log",
   "plan_brief | style_caption",
   "plan_master",
   "cjk_font",
@@ -101,6 +104,7 @@ forbidden_modules = [
   "render2d_worker.plan_master",
   "render2d_worker.plan_brief",
   "render2d_worker.style_caption",
+  "render2d_worker.activity_log",
   "render2d_worker.activities",
   "render2d_worker.cli",
   "render2d_worker.worker",

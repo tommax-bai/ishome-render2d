@@ -30,6 +30,7 @@ from typing import Any
 
 from temporalio import activity
 
+from render2d_worker.activity_log import logged_activity
 from render2d_worker.cjk_font import CjkFontMissingError
 from render2d_worker.models import FloorplanGeometry, PlanCopy, PlanNote
 from render2d_worker.plan_brief import PlanBriefError, render_plan_brief
@@ -65,6 +66,7 @@ class PlanRenderer:
         self._store = store
 
     @activity.defn(name=ACTIVITY_PLAN_2D_RENDER)
+    @logged_activity
     async def render_plan_2d(self, request: dict[str, Any]) -> dict[str, Any]:
         """几何 → 母版 + 墙体图层 + 房间遮罩 + 房间锚点（+ 功能说明图）→ 写私有桶，返回对象键。
 
@@ -150,6 +152,7 @@ class PlanRenderer:
         }
 
     @activity.defn(name=ACTIVITY_STYLE_CAPTION_OVERLAY)
+    @logged_activity
     async def overlay_style_caption(self, request: dict[str, Any]) -> dict[str, Any]:
         """风格图（桶里的键）+ 页面文案 → 确定性叠上标题/总结/贴士 → 写回同前缀，返回**对象键**。
 
