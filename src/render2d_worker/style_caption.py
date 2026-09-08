@@ -20,6 +20,11 @@ imagegen 模板里用一句英文向模型讨的（`cream-journal` 的 `RESERVE 
 纯色的效果实测过：放大三倍看接缝那一线由"有颗粒"突变成"死平"，底边还多一道 7 级的色阶；
 铺上纸纹后同样放大三倍看不出接缝，也看不出重复（92㎡ 真图，2026-09-07）。
 
+**折行按中文排版规则来，不按字宽硬切**（2026-09-08）：先按句读断成短句、短句当整块装行，
+断不开才按字断，再由行首禁则/行尾禁则/孤字规则收拾断点（`_wrap`）。硬切那一版把
+`绿植` 断成 `绿` / `植`，是 138㎡ 真跑样张照出来的。**"不在词内断"只做到句读这一层**——
+再往里要分词，分词要引词典依赖且本身也是猜，停在这儿（`_by_char` 的注释写了触发条件）。
+
 **为什么这一层在 render2d 不在 imagegen**：确定性绘制归这个仓——字要落得准，坐标不能是猜的。
 生成式那边只管画面、一个字不写；两边分工与"母版不写字"是同一条线。
 """
@@ -66,6 +71,28 @@ _SUBTLE = (96, 92, 88)
 _TEXT_WIDTH_SHARE = 0.80
 """标题与总结占页宽这么多；小贴士按 0.82 占自己那一栏（见 `render_caption`）。折行按字数折，
 折完再按字体实测宽度复核——中日韩字形一格一个字宽，西文更窄，实测那一道是防外语标题。"""
+
+_CLAUSE_ENDERS = "，。、；：？！…,.;:?!"
+"""断句处：一个短句到这儿算完，标点留在它自己那句的尾巴上。
+
+**中文没有词间空格，句读是唯一不用分词就能确定的语义边界**——断在这儿一定不在词中间。
+真文案实测（138㎡ 那三条小贴士，2026-09-07）：14/13/15 字，每条正好一个逗号，一栏 11 字，
+按句读断出来是 6+8、6+7、8+7，两行都比按字硬切（11+3、11+2、11+4）匀。"""
+
+_NO_LINE_START = "，。、；：？！…—）〕】》」』〉”’,.;:?!)]}"
+"""行首禁则：句读与收尾的括号引号不许领头一行。中文排版的基本规则，纯确定性可做。
+
+半角那几个一起收进来，是因为文案由模型产出，`，` 与 `,` 都可能出现（真跑见过混用）。"""
+
+_NO_LINE_END = "（〔【《「『〈“‘([{"
+"""行尾禁则：起头的括号引号不许留在行尾——它得跟着它领的那段走。"""
+
+_ORPHAN_TAIL_CHARS = 2
+"""末行少到这个字数（含）就算孤字，要往回调断点匀一行。
+
+**这个数是排版规则本身的定义，不是量出来的**（区别于 `BLANK_ROW_TOLERANCE` 那种实测阈值，
+也不是一条裁决）：孤字的说法就是"末行只剩一两个字"，一两个字＝ ≤2。
+写成常量是为了让判据露在外面，不是为了看起来有依据。"""
 
 
 class StyleCaptionError(Exception):
@@ -218,8 +245,100 @@ def _paper_band(
     return band
 
 
+def _clauses(text: str) -> list[str]:
+    """按句读把一段话切成短句，标点跟在它所属那句的尾巴上（所以切完天然不违行首禁则）。
+
+    连着的标点（`……`、`？！`）算同一个句尾，不切成两句。
+    """
+    out: list[str] = []
+    head = 0
+    for at, char in enumerate(text):
+        tail_of_run = at + 1 == len(text) or text[at + 1] not in _CLAUSE_ENDERS
+        if char in _CLAUSE_ENDERS and tail_of_run:
+            out.append(text[head : at + 1])
+            head = at + 1
+    if head < len(text):
+        out.append(text[head:])
+    return out
+
+
+def _break_at(text: str, per_line: int) -> int:
+    """在 `text` 里挑断点：从满一行处**往回退**，退到两条禁则都满足为止。
+
+    退（本行少一个字）不是进（把标点塞进本行）：进会让这一行宽过栏，而横向放不下是要整张
+    不出的（`StyleCaptionError`）——禁则不该反过来把版面撑破。退到只剩一个字就停手，
+    免得一串标点长过一栏时退成空行、死循环。
+    """
+    cut = min(per_line, len(text))
+    while cut > 1 and (
+        (cut < len(text) and text[cut] in _NO_LINE_START) or text[cut - 1] in _NO_LINE_END
+    ):
+        cut -= 1
+    return cut
+
+
+def _unorphan(lines: list[str], per_line: int) -> list[str]:
+    """末行只剩一两个字就把最后两行匀一匀——孤零零吊一个字在那儿最难看。
+
+    只匀最后两行、只在按字断那一路用：句读断出来的行本身是完整短句，再去匀它等于拿"不孤字"
+    换"断在词里"，方向反了。匀不动（匀完宽过一栏）就原样返回，不硬凑。
+    """
+    if len(lines) < 2 or len(lines[-1]) > _ORPHAN_TAIL_CHARS:
+        return lines
+    merged = lines[-2] + lines[-1]
+    cut = _break_at(merged, (len(merged) + 1) // 2)
+    if len(merged) - cut > per_line:
+        return lines
+    return [*lines[:-2], merged[:cut], merged[cut:]]
+
+
+def _by_char(text: str, per_line: int) -> list[str]:
+    """一个短句本身就宽过一栏，只能按字断：禁则兜住标点，末行太短再匀一次。
+
+    **这一路会断在词中间**：判词界要分词，中文分词要引第三方词典依赖，这个仓今天只依赖
+    Pillow（见本轮记录里为什么不引）。走到这一路的前提是"一个不带句读的短句就宽过一栏"——
+    真文案的三条小贴士都不走这儿。
+    """
+    lines: list[str] = []
+    rest = text
+    while len(rest) > per_line:
+        cut = _break_at(rest, per_line)
+        lines.append(rest[:cut])
+        rest = rest[cut:]
+    lines.append(rest)
+    return _unorphan(lines, per_line)
+
+
 def _wrap(text: str, per_line: int) -> list[str]:
-    return [text[at : at + per_line] for at in range(0, len(text), per_line)] or [""]
+    """折行：**先按句读断，断不开才按字断**。
+
+    从前是按字宽硬切，`阳台细长但通透，种点绿植刚刚好` 被切成 `…种点绿` / `植刚刚好`——
+    `绿植` 拆成两行（138㎡ 真跑样张，2026-09-07）。中文没有词间空格，硬切不知道词在哪儿；
+    但**句读知道语义单位在哪儿**，且它是文案自带的、不用引分词依赖。所以：把短句当成不可拆的
+    整块贪心装行，装不下的那一块才落到按字断，再由禁则与孤字规则收拾断点。
+    """
+    lines: list[str] = []
+    for clause in _clauses(text):
+        if lines and len(lines[-1]) + len(clause) <= per_line:
+            lines[-1] += clause
+        elif len(clause) <= per_line:
+            lines.append(clause)
+        else:
+            lines.extend(_by_char(clause, per_line))
+    return lines or [""]
+
+
+def _ink_center(font: ImageFont.FreeTypeFont, line: str) -> float:
+    """这一行**墨迹**的中点（相对行首）。行尾不带标点时它跟字宽的中点差不到 1px。
+
+    **为什么不直接按字宽居中**：中日韩标点是全角格子，`，` 的墨只占左下角三分之一，
+    右边三分之二是空的。按句读折行之后行尾常带一个逗号，按字宽居中就把这一行整体推左——
+    138㎡ 真图实测偏 16px（小贴士字号 43，合 0.37 个字宽），同一条贴士的两行肉眼就不对齐了
+    （第二行同样实测偏 0.5px，即"不带标点的行本来是准的"）。
+    """
+    mask = font.getmask(line)
+    box = mask.getbbox() if mask.size[0] else None
+    return (box[0] + box[2]) / 2 if box else font.getlength(line) / 2
 
 
 def _centered(
@@ -232,7 +351,14 @@ def _centered(
     fill: tuple[int, int, int],
 ) -> int:
     for line in lines:
-        pen.text((center_x, top_y), line, font=font, fill=fill, anchor="ma")
+        # 锚点从 `ma`（按字宽居中）改成 `la` + 自己算的墨心：纵向基准仍是 ascender，不变
+        pen.text(
+            (round(center_x - _ink_center(font, line)), top_y),
+            line,
+            font=font,
+            fill=fill,
+            anchor="la",
+        )
         top_y += line_px
     return top_y
 

@@ -1,8 +1,12 @@
-"""叠字红线：版面自己造（文案再长也放得下）、画面一个像素不动、同一份输入画两次一样。
+"""叠字红线：版面自己造（文案再长也放得下）、画面一个像素不动、同一份输入画两次一样，
+外加中文折行的三条排版规则（行首禁则、行尾禁则、不孤字）。
 
 用户裁决 2026-09-07："把'留白'从'求模型'改成'自己做'。生成侧不再要求留白带"。
 此前这里守的是反面——"量版面、放不下就整张失败去重生成"；那条门禁连同它的两个用例
 随裁决作废，换成本文件这几条。
+
+折行那几条是 2026-09-08 加的：138㎡ 真跑样张把 `绿植` 断成 `绿` / `植`（按字宽硬切，
+没有任何中文排版规则）。
 """
 
 from __future__ import annotations
@@ -14,9 +18,13 @@ from PIL import Image, ImageDraw
 
 from render2d_worker.models import PlanCopy
 from render2d_worker.style_caption import (
+    _NO_LINE_END,
+    _NO_LINE_START,
+    _ORPHAN_TAIL_CHARS,
     BLANK_ROW_TOLERANCE,
     TEXT_PAD_SHARE,
     StyleCaptionError,
+    _wrap,
     render_caption,
 )
 
@@ -27,6 +35,39 @@ _COPY = PlanCopy(
 )
 
 _WIDTH, _HEIGHT = 900, 1400
+
+_REAL_COPY = PlanCopy(
+    title="暖光小院",
+    summary="一进门就松一口气，每个角落都妥帖安放生活日常。",
+    tips=[
+        "次卧三扇窗，晾晒和通风都敞亮",
+        "主卧一扇窗，配好窗帘更静谧",
+        "阳台细长但通透，种点绿植刚刚好",
+    ],
+)
+"""138㎡ 真跑那一份文案（2026-09-07 样张上的原字），折行那几条门禁盯的就是它。"""
+
+_REAL_TIP_PER_LINE = 11
+"""真图上小贴士一行放几个字。**算出来的不是拍的**：成图宽 1888 →
+字号 int(1888×0.023)=43，一栏 1888//3=629，可用 int(629×0.82)=515，515//43=11。"""
+
+_WRAP_SAMPLES = (
+    *_REAL_COPY.tips,
+    _REAL_COPY.summary,
+    "玄关放个换鞋凳，回家先坐下换鞋，鞋柜留一格常穿鞋",
+    "厨房、卫生间都有窗；洗完澡开窗，潮气散得快。",
+    "主卧朝南（一整面窗），午后光能铺到床尾",
+    "客厅够方正，沙发怎么摆都不挡道！",
+    "暖光小院里的一整天从清晨的光落在餐桌上开始",
+)
+"""折行规则要在这些句子上都成立。混了逗号、顿号、分号、括号、感叹号与一句不带标点的长句。"""
+
+_WRAP_WIDTHS = range(4, 17)
+"""每句都从 4 字一行试到 16 字一行。真图是 11（小贴士）与 29（总结），两头都罩住。
+
+**为什么不从 1 试起**：一行 1~3 个字时"标点不许领头"本身就可能无解（连着三个标点、
+一行放两个字，怎么排都得有一行由标点起头）。那是图窄到不成立的那一类，由
+`StyleCaptionError` 管，不由折行管。"""
 
 
 def _page(top_blank_share: float, bottom_blank_share: float) -> bytes:
@@ -125,3 +166,117 @@ def test_same_input_renders_byte_identical() -> None:
     page = _page(0.28, 0.30)
 
     assert render_caption(page, _COPY).image_png == render_caption(page, _COPY).image_png
+
+
+# ---------------------------------------------------------------------------
+# 折行：中文排版那三条规则（2026-09-08 加）
+# ---------------------------------------------------------------------------
+
+
+def test_the_word_that_got_split_on_the_real_sample_stays_whole() -> None:
+    """`绿植` 曾被断成 `绿` / `植`——138㎡ 真跑样张，2026-09-08 修。这条盯的就是它。
+
+    折行改成"先按句读断"之后，`阳台细长但通透，` 与 `种点绿植刚刚好` 各自成行，
+    断点落在逗号上，词整个留在一行里。
+    """
+    lines = _wrap("阳台细长但通透，种点绿植刚刚好", _REAL_TIP_PER_LINE)
+
+    assert lines == ["阳台细长但通透，", "种点绿植刚刚好"]
+    assert any("绿植" in line for line in lines), f"`绿植` 被拆到两行：{lines}"
+
+
+def test_the_three_real_tips_break_at_their_comma() -> None:
+    """三条真小贴士都断在自己那个逗号上——两行是两个完整短句，不是两截。"""
+    wrapped = [_wrap(tip, _REAL_TIP_PER_LINE) for tip in _REAL_COPY.tips]
+
+    assert wrapped == [
+        ["次卧三扇窗，", "晾晒和通风都敞亮"],
+        ["主卧一扇窗，", "配好窗帘更静谧"],
+        ["阳台细长但通透，", "种点绿植刚刚好"],
+    ]
+
+
+def test_punctuation_never_starts_a_line() -> None:
+    """行首禁则：句读与收尾的括号引号不许领头一行。中文排版的基本规则。"""
+    for text in _WRAP_SAMPLES:
+        for per_line in _WRAP_WIDTHS:
+            lines = _wrap(text, per_line)
+            for line in lines:
+                assert line[0] not in _NO_LINE_START, (
+                    f"`{line[0]}` 领了一行的头（{per_line} 字一行）：{lines}"
+                )
+
+
+def test_an_opening_bracket_never_ends_a_line() -> None:
+    """行尾禁则：起头的括号引号不许留在行尾——它得跟着它领的那段走。"""
+    for text in _WRAP_SAMPLES:
+        for per_line in _WRAP_WIDTHS:
+            lines = _wrap(text, per_line)
+            for line in lines:
+                assert line[-1] not in _NO_LINE_END, (
+                    f"`{line[-1]}` 留在了行尾（{per_line} 字一行）：{lines}"
+                )
+
+    # 断点被禁则往回退了一格：满行本该切在 `（` 后面，退成整个括号连着下一行走
+    assert _wrap("主卧朝南（一整面窗），午后光能铺到床尾", 5)[0] == "主卧朝南"
+
+
+def test_a_lone_tail_character_gets_pulled_back() -> None:
+    """孤字：末行只剩一两个字就把最后两行匀一匀，不吊一个字在那儿。
+
+    这句不带标点，走的是"按字断"那一路：21 个字按 10 字一行硬切是 10/10/1，
+    末行那个 `始` 是孤字；匀完成 10/6/5。
+    """
+    lines = _wrap("暖光小院里的一整天从清晨的光落在餐桌上开始", 10)
+
+    assert lines == ["暖光小院里的一整天从", "清晨的光落在", "餐桌上开始"]
+    assert len(lines[-1]) > _ORPHAN_TAIL_CHARS
+
+
+def test_wrapping_never_drops_a_character_nor_overflows_the_line() -> None:
+    """折行只是插换行：字一个不少、顺序不变，且没有一行超过给的字数。
+
+    禁则与孤字都是"把断点往回退"，退过头就会吞字或撑破栏——这条是它俩的兜底。
+    """
+    for text in _WRAP_SAMPLES:
+        for per_line in _WRAP_WIDTHS:
+            lines = _wrap(text, per_line)
+            assert "".join(lines) == text, f"折行改了字：{lines}"
+            assert all(len(line) <= per_line for line in lines), (
+                f"有一行超过 {per_line} 字：{lines}"
+            )
+
+
+def test_a_line_ending_in_a_comma_sits_optically_centered() -> None:
+    """全角标点的墨只占格子左下角，右边三分之二是空的。
+
+    按字宽居中，带标点收尾的那一行整体偏左——138㎡ 真图实测 16px（字号 43，0.37 个字宽），
+    同一条小贴士的两行肉眼就不对齐。改成按墨心居中之后两行都落回栏心。
+    这里按 `render_caption` 同源的口径重算字号行高，逐行量墨迹左右缘。
+    """
+    result = render_caption(_page(0.28, 0.30), _REAL_COPY)
+
+    tip_px = max(int(_WIDTH * 0.023), 12)
+    tip_line = int(tip_px * 1.5)
+    column = _WIDTH // len(_REAL_COPY.tips)
+    with Image.open(io.BytesIO(result.image_png)) as out:
+        band = out.convert("L").crop(
+            (0, result.height_px - result.bottom_band_px, _WIDTH, result.height_px)
+        )
+    top = (result.bottom_band_px - 2 * tip_line) // 2
+
+    for row in range(2):  # 三条贴士这一份文案都是两行
+        for index in range(len(_REAL_COPY.tips)):
+            cell = band.crop(
+                (
+                    index * column,
+                    top + row * tip_line,
+                    (index + 1) * column,
+                    top + (row + 1) * tip_line,
+                )
+            )
+            ink = cell.point(lambda value: 255 if value < 160 else 0).getbbox()
+            assert ink is not None, f"第 {index + 1} 栏第 {row + 1} 行没画上字"
+            assert abs((ink[0] + ink[2]) / 2 - column / 2) <= 2, (
+                f"第 {index + 1} 栏第 {row + 1} 行墨心偏出栏心 2px：{ink}"
+            )
