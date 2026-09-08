@@ -82,11 +82,27 @@ async def test_overlay_writes_a_png_under_the_derived_key() -> None:
     written = store.written[result["image_object_key"]]
     assert written.startswith(b"\x89PNG"), "叠字成品由确定性绘制层重新编码为 PNG"
     with Image.open(io.BytesIO(written)) as out:
-        assert out.size == (result["width_px"], result["height_px"]) == (900, 1400)
+        assert out.size == (result["width_px"], result["height_px"])
+        # 成图＝画面原样 + 上下两条自己造的白边（用户裁决 2026-09-07）
+        assert out.size == (900, 1400 + result["top_band_px"] + result["bottom_band_px"])
 
 
-async def test_no_room_for_text_is_a_failure_not_a_squashed_image() -> None:
-    store = _StubStore({_STYLE_KEY: _page(0.01, 0.30)})
+async def test_a_frame_filling_image_is_no_longer_a_failure() -> None:
+    """生成侧不再要求留白带之后：画面铺满整幅也照样出图，不再回 style-caption-failed。"""
+    store = _StubStore({_STYLE_KEY: _page(0.0, 0.0)})
+    result = await PlanRenderer(store).overlay_style_caption(  # type: ignore[arg-type]
+        {"style_object_key": _STYLE_KEY, "copy": _COPY}
+    )
+    assert result["verdict"] == "ok", result
+    assert result["height_px"] > 1400
+
+
+async def test_an_image_too_small_to_caption_is_not_written_as_success() -> None:
+    """StyleCaptionError 仍映射成 style-caption-failed、且一个字节都不落桶（哲学未变）。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (20, 30), (247, 244, 238)).save(buffer, format="JPEG", quality=92)
+    store = _StubStore({_STYLE_KEY: buffer.getvalue()})
+
     result = await PlanRenderer(store).overlay_style_caption(  # type: ignore[arg-type]
         {"style_object_key": _STYLE_KEY, "copy": _COPY}
     )

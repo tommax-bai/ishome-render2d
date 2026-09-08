@@ -156,7 +156,8 @@ class PlanRenderer:
         入参不透明字典：`style_object_key`（imagegen `atmosphere-visual` 回执里的 image_object_key）
         与 `copy`（genpipe `plan-copy-write` 回执里的 {title, summary, tips}）。
         文案在产它的那一侧机检过了（数字必须在事实清单里），这一层只画不判。
-        **版面量不出足够的连续空白即整张失败**——失败形态是"重生成一张底图"，不是把字压在画面上。
+        **版面由本层自己造**（用户裁决 2026-09-07）：画面原样贴到一张更高的纸上，上下白边由
+        文案实测高度算出来——多长的文案都放得下，不再"量版面找空白、放不下就重生成一张底图"。
         """
         style_object_key = str(request.get("style_object_key") or "")
         if not style_object_key:
@@ -194,8 +195,9 @@ class PlanRenderer:
             "content_type": "image/png",
             "width_px": captioned.width_px,
             "height_px": captioned.height_px,
-            "top_blank_px": captioned.top_blank_px,
-            "bottom_blank_px": captioned.bottom_blank_px,
+            # 白边高度＝画面在成图里的落点，同时是"这一跑的文案排了多高"的自证数
+            "top_band_px": captioned.top_band_px,
+            "bottom_band_px": captioned.bottom_band_px,
         }
 
 

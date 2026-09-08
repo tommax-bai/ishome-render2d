@@ -193,13 +193,20 @@ class PlanCopy(_GeometryModel):
 
 
 class StyleCaptioned(BaseModel):
-    """叠完字的风格图，连同量到的连续空白高度（不够时它就是失败原因本身）。"""
+    """叠完字的风格图：画面原样 + 上下两条自己造的白边（用户裁决 2026-09-07）。
+
+    两个高度是**造出来的**不是量出来的——由文案排完之后的实测高度算出（`style_caption`），
+    因此它们同时也是"画面在成图里占哪一段"的坐标：画面从 `top_band_px` 起、宽 `width_px`、
+    高 `height_px - top_band_px - bottom_band_px`。
+    此前那对 `top_blank_px`/`bottom_blank_px` 记的是"模型给了多少空白"，随留白改由自己造而作废——
+    同一个名字底下换一种含义，比换个名字贵得多。
+    """
 
     image_png: bytes
     width_px: int
     height_px: int
-    top_blank_px: int = 0
-    bottom_blank_px: int = 0
+    top_band_px: int = 0
+    bottom_band_px: int = 0
 
 
 class PlanMaster(BaseModel):
